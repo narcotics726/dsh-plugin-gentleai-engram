@@ -1,0 +1,35 @@
+version: 1
+
+# Minimal local taxonomy for this repository's long-lived specs.
+# Created by change: engram-bridge-p0 (there was no taxonomy before, so the
+# metadata criteria of theseus-spec-writing-standard could not be evaluated).
+
+metadata:
+  status: active
+  change: engram-bridge-p0
+
+types:
+  - capability.behavior
+  - technical.contract
+  - technical.configuration
+  - policy.convention
+
+statuses:
+  - draft
+  - active
+
+projects:
+  - dsh-plugin-gentleai-engram
+
+domains: {}
+
+anchor_categories:
+  - files
+  - directories
+  - packages
+  - commands
+  - database.tables
+  - config_keys
+  - env
+  - events
+  - external_systems

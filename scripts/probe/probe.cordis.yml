@@ -1,0 +1,14 @@
+# Probe overlay for dsh profiles: one global observer plugin.
+#   dsh --profile headless --patch <repo>/scripts/probe/probe.cordis.yml "<task>"
+#
+# PROBE_OUT is required (JSONL sink). PROBE_SCENARIO / PROBE_DENY /
+# PROBE_ABORT_AFTER_CHARS select the behaviour under test.
+- insert:
+    - id: probe-events
+      name: '<repo>/scripts/probe/probe-events.mjs'
+      config:
+        out: !!js process.env.PROBE_OUT
+        scenario: !!js process.env.PROBE_SCENARIO ?? 'observe'
+        deny: !!js process.env.PROBE_DENY ?? ''
+        abortAfterChars: !!js Number(process.env.PROBE_ABORT_AFTER_CHARS ?? '8')
+        llmModule: !!js process.env.PROBE_LLM_MODULE ?? '<dsh-install-root>/node_modules/@deepseek-ai/dsh-llm/lib/index.js'

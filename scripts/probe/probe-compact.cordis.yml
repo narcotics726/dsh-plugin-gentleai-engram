@@ -1,0 +1,12 @@
+# Probe overlay that forces the basic compaction backend into pressure.
+# Applied ON TOP of probe.cordis.yml:
+#   dsh --profile headless --patch probe.cordis.yml --patch probe-compact.cordis.yml "<task>"
+#
+# A row patch replaces the target row's whole config, so this states the full
+# policy: a tiny pressure threshold and a one-token retained tail make even a
+# short conversation a "useful range" for the step-boundary compaction check.
+- id: compaction-basic
+  config:
+    auto: true
+    thresholdRatio: 0.001
+    retainTokens: 1

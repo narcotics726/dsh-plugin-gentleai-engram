@@ -52,7 +52,7 @@
 ## 9. 交付与迁移
 
 - [ ] 9.1 `dsh plugin --profile {web,headless,open-design} add <repo>`；验证：`dsh plugin --profile web list` 可见且为 `link:`
-- [ ] 9.2 删除 home patch 手写 `insert`，改为 config 覆盖；验证：`dsh --profile web --dump-config | grep engram-bridge` 恰好一行
+- [ ] 9.2 删除 home patch 手写 `insert`，改为对 `engram-bridge` 的 config 覆盖；**新旧桥不能并存**（两者都注册 `mcp__engram__*`，同层重名会让注册失败），故 9.1 与 9.2 必须在同一次重启前完成；验证：`dsh --profile web --dump-config | grep -E "engram-bridge|mcp-engram"` 只出现 `engram-bridge` 一次，且启动日志无重复注册错误
 - [ ] 9.3 备份并退役三份 `node_modules/dsh-engram-session-v2/`；验证：目录不存在且 `dsh web` 启动无错
 - [ ] 9.4 端到端验收：新会话绑定 / 两会话不串档 / 学习条目落库一次 / 压缩后摘要落库且请求含记忆上下文 / `engram doctor` 无 mismatch / 卸载无残留；验证：命令输出记录到本 change 的验收小节
 - [ ] 9.5 archive 后元数据回填：`openspec archive` 会丢弃 delta 的 frontmatter（实测归档产物只有 `# <cap> Specification` + `## Purpose` + `## Requirements`）；归档后把 `id/title/type/status/anchors/triggers/related` 补回 `openspec/specs/<cap>/spec.md`；验证：归档后 6 个 capability 的 spec 均含 `type:` 行

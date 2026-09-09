@@ -9,7 +9,7 @@
 | `mem_current_project` 用进程 cwd 解析项目 | 实测返回 `intranet-aio`（与当时会话工作区无关） |
 | `mem_session_start(directory=X)` 用 X 解析，返回 `project`/`project_source` | 实测 `config` / `git_root` 均正确 |
 | `mem_save` 优先用 session 的项目 | 实测 `project_source: session` |
-| `mem_capture_passive` / `mem_session_end` **只认 cwd，忽略 session** | 实测返回 `project_source: git_root` 且落到 cwd 项目 |
+| `mem_capture_passive` / `mem_session_end` 的**项目**只取 cwd（不接受 `project` 参数）；**归属仍由传入的 `session_id` 决定** | 实测：`project_source: git_root`、落到 cwd 项目，但 observation 的 `session_id` 为传入值 |
 | 显式 project 是 validated selection，未支撑则硬失败 | 实测 `unknown_project`；DOCS L830-845 |
 | `mem_save` 用不存在的 session_id → `unknown_session` | 实测 |
 | 1.20.0 允许对已结束会话再次 `mem_session_start` | 实测（DOCS 所述 `session_already_ended` 在本版本不成立） |
@@ -38,7 +38,7 @@
 1. **按工作区池化 engram 子进程，cwd = 会话工作区。** 因为 `mem_capture_passive` / `mem_session_end` 只认进程 cwd 且没有可注入的 project 参数（实测 + DOCS L826），单进程多工作区必然把记忆写进错误的项目。替代方案：单进程 + 全程显式注入（对这两个工具无效）；每会话一进程（进程数随会话增长，收益相同）。
 2. **懒启动 + 并发去重 + 串行启动与重试。** 工作区集合在启动时未知（`SessionHeader.cwd` 由会话创建时决定）；实测观察到启动期瞬时数据库锁失败，故启动需串行化并允许重试。空闲回收与连接上限见配置。
 3. **项目名由 engram 解析一次，插件缓存并全程显式注入。** git 仓库的项目名可能是 engram 存储的 binding label（DOCS L792-793），插件无法从文件系统复制；且显式 project 是 validated selection，猜错会硬失败（实测 `unknown_project`）。替代方案（插件自判：读 `.engram/config.json` + git + basename）在 git_remote / monorepo / binding 三种情形会错。
-4. **注入优先级**：显式参数 > `projectOverrides[工作区]` > 会话解析结果 > `ENGRAM_PROJECT` > 不注入。绝不使用目录名兜底（实测该兜底会产出 engram 不认账的名字）。与 `~/.dsh/AGENTS.md` 不矛盾：AGENTS.md 写的是 engram 的 **cwd 路径**（实测 `ENGRAM_PROJECT` 在该路径胜出，`project_source: process_override`），本插件走的是 **directory 路径**（实测 directory 胜出，`git_root`）。AGENTS.md 需按 tasks 10.2 改写为指向本 spec。
+4. **注入优先级**：显式参数 > `projectOverrides[工作区]` > 会话解析结果 > `ENGRAM_PROJECT` > 不注入。绝不使用目录名兜底（实测该兜底会产出 engram 不认账的名字）。与 `~/.dsh/AGENTS.md` 不矛盾：AGENTS.md 写的是 engram 的 **cwd 路径**（实测 `ENGRAM_PROJECT` 在该路径胜出，`project_source: process_override`），本插件走的是 **directory 路径**（实测 directory 胜出，`git_root`）。AGENTS.md 需按 tasks 10.2 改写为指向本 spec：旧文描述的是 cwd 路径（`ENGRAM_PROJECT` > 目录检测），本 spec 管的是 directory 路径（directory > `ENGRAM_PROJECT`），且**删除 basename 兜底**（插件永不注入未经 engram 认账的项目名）。
 5. **写类工具靠 `session_id`，不靠 cwd。** 显式 session_id 是 engram 官方指定的并发解法（DOCS L839：不带 session_id 时多候选 fail closed），且 `mem_save` 的项目优先取 session 的项目。`mem_save_prompt` 的 `project` 只用于歧义恢复，不注入；其 `session_id` 照常注入。**被动捕获的归属同样靠注入的 `session_id`**：实测同工作区两个会话各带自己的 `session_id` 提交捕获，两条 observation 分别落在各自会话下（项目均取自 cwd）——归属与项目由两条不同机制负责：归属 = 注入的 `session_id`，项目 = 按工作区池化的 cwd。
 6. **会话身份 = dsh 会话标识，重复开始一律复用（同 id 幂等）。** 实测本构建只产生 `startup`（子会话亦然），`resume` 有生产者但 headless 无入口，`clear` / `compact` 无生产者——因此幂等要求按"同一标识重复开始不新建"写，并由单元测试覆盖；spec 不为 `clear` / `compact` 写场景（它们无法被触发）。**P0 不调用 `mem_session_end`**。实测（隔离 DB）：对已结束会话，`mem_save` / `mem_capture_passive` / `mem_session_summary` **仍全部成功**，且同 id 可再次 `mem_session_start` —— 所以在本机 1.20.0 上"错判结束"的代价确实很小；不结束的代价同样小（我们始终注入 `session_id`，engram 的"多候选 fail closed"只影响不带 session_id 的路径，观测表本身带 session_id，按会话聚合不受影响；真实代价仅是 `sessions` 表增长与 `ended_at` 长期为空）。留 P0 不结束的决定性理由是**版本风险**：DOCS 声明已结束会话不可重开（本版本不成立），若将来落实而我们在 `agent/disposed` 就结束，resume 会撞 `session_already_ended`，破坏"同一 dsh 会话 = 同一 engram 会话"的不变量。压缩恢复进 P0 后我们会写 `mem_session_summary`，叙事层本就有内容。
 7. **被动捕获挂 `agent/turn-stopping`，每回合一次。** 实测：该钩子在**被中止的回合完全不触发**（中止回合在 turn-stopping 处静默），所以"跳过中断回合"由钩子语义天然满足，不需要读 `interrupted`；正常回合恰好一次，位于最后一条 `assistant/message` 之后、`turn/end` 之前，正好拿到最终回复文本。又因**监听器内 steer 会让同一回合二次触发**，捕获必须按 (会话, 回合) 加闩锁。若日后需要在中止回合做簿记，唯一可靠信号是 `turn/end` 的 `reason.kind === 'aborted'`。条目拆分与去重由 engram 完成（DOCS L1001），插件不重实现提取。
@@ -77,3 +77,4 @@
 - 探针 Q1–Q4 已闭环（结论与证据见 `docs/event-findings.md`）：中止回合不触发 `turn-stopping`；`agent/created` 窗口的 `restrict` 生效；`clear`/`compact` 无生产者；`session-start` 先于首个回合。
 - `resume` 有生产者但 headless 无入口，尚未实测；幂等逻辑按"同一标识重复开始不新建"实现并单测覆盖，等有入口时补端到端验证。
 - 池上限与空闲时长的最终取值（依赖 engram 进程 RSS 实测）。
+- archive 行为已实测闭环：`openspec archive` 丢弃 delta 的 frontmatter（产物仅 `# <cap> Specification` + `## Purpose` + `## Requirements`），故不再列为开放项，改为 tasks 9.5 在归档后回填 `id/title/type/status/anchors/triggers/related`。

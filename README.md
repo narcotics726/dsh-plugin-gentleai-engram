@@ -1,62 +1,34 @@
 # dsh-plugin-gentleai-engram
 
-> **非官方（unofficial）**：本仓库是第三方为 DeepSeek Harness 写的接入层，不是 Gentleman Programming 的官方项目。
+把 [engram](https://github.com/Gentleman-Programming/engram)（本地 SQLite 持久记忆）的 MCP 后端接入 **dsh**：按会话工作区连接 engram、绑定会话、注入项目与会话参数、把回合收尾与压缩摘要写回记忆，并在压缩后注入有界记忆上下文。
 
-把 [engram](https://github.com/Gentleman-Programming/engram)（本地 SQLite 持久记忆，agent-agnostic）以 **Cordis 插件**形式接入 **dsh**，补齐官方 Claude Code / OpenCode / Pi 插件才有、而 dsh 侧一直缺失的三件事——这正是 engram 官方文档 [What you lose without a plugin](https://engram.gentlemanprogramming.com/agent-setup/other-mcp-agents/) 列出的三项：**生命周期钩子、会话编排、压缩恢复**。
+> 非官方第三方插件（unofficial），当前针对 engram `1.20.0`。
 
-定位是**接入层**，不是记忆系统：不 fork engram、不改它的 DB、不做检索/图谱/清理策略。
-
-## 为什么需要它
-
-2026-09-09 在本机实测（`~/.engram/engram.db` + 旧草稿插件）：
-
-| 缺口 | 实测证据 |
-| --- | --- |
-| 记忆串档 | 新记忆全部落进该项目**最近一个** session；`engram doctor` 报 `session_project_directory_mismatch` |
-| 被动捕获从未发生 | `~/.dsh/AGENTS.md` 声称 `## Key Learnings:` 会被自动保存，DB 里 0 条 |
-| 压缩后无恢复 | 压缩只留 `session/event compaction/*`，没有任何钩子把摘要写回记忆 |
-
-根因是 dsh **单进程服务多个工作区**，而 engram 的 project 默认取**它自己进程的 cwd**：实测 `mem_current_project` 返回的是另一个项目。更麻烦的是 `mem_capture_passive` / `mem_session_end` **只认 cwd 且忽略 session**，所以单一进程无论怎么注入参数都必然把记忆写进错误的项目。
-
-## 提供什么
+## 能力
 
 | 能力 | 行为 |
 | --- | --- |
-| 按工作区连接池 | 每个会话工作区一个 engram 子进程（cwd = 工作区），懒启动、single-flight、串行启动 + 重试、空闲回收、上限淘汰 |
-| 会话绑定 | `agent/session-start` → `mem_session_start({id: dsh 会话 id, directory: 工作区})`，读回 engram 解析的 project；绑定是工具调用的屏障 |
-| 隐式参数注入 | 声明 `project` / `session_id` 的工具自动带上正确值；显式传参优先；`mem_save_prompt` 的 `project` 例外（只用于歧义恢复） |
-| 被动捕获 | `agent/turn-stopping` 把回合最终回复交给 `mem_capture_passive`，每回合一次（steer 二次触发也去重）；中止的回合不触发该钩子，天然跳过 |
-| 压缩恢复 | `compaction/summary` → `mem_session_summary`（摘要内容直接用，不自己生成）；`compaction/end` 后注入一段有界记忆上下文 |
-| 子 agent 遮蔽 | 子 agent 会话中 engram 工具从模型可见工具面消失，经 `mcp_call` 之类旁路调用也会被拒 |
-| 失败降级 | engram 缺失 / 握手失败 / 超时 → 零注册 + 一条日志，不阻断模型轮次 |
-
-> 工具面在首次成功发现后缓存到 `$DSH_HOME/storages/engram-bridge/tools.json`（含 `command`/`args` 指纹），使之后每次启动的**首个**模型请求就已带上全部 engram 工具；冷启动（无缓存）的首个请求可能晚一步可见。
-
-## Model Experience
-
-本插件对模型输入的影响（dsh 插件 README 规范要求）：
-
-- **工具**：把 engram 声明的工具以 `mcp__engram__*` 注册进 dsh，名称、描述、参数 schema 与 engram 声明一致（本机 1.20.0 为 22 个）。
-- **隐式参数**：为声明 `project` 的工具注入项目名；`mem_session_start` 注入 `directory`；声明 `session_id` 的工具注入当前 dsh 会话 id。**调用方显式传参一律不覆盖**。
-- **提示词**：P0 **不新增**任何 system prompt 段（KV cache 无影响）；压缩恢复通过 `agent.inject()` 注入一条 user 消息，落在会话日志里可重建。
-- **会话日志**：**不新增**事件类型（未标记的未知事件类型会让 dsh 会话日志报 `SessionFormatUnsupportedError`）。
-- **子 agent**：engram 工具对子 agent 不可见，也不为其建立 engram 会话。
-- **失败**：engram 不可用时相关能力失效并记日志，**不阻断**模型轮次。
+| 工具接入 | 把 engram 声明的工具以 `mcp__engram__*` 注册进 dsh，名称、描述、参数 schema 与 engram 声明一致（engram 1.20.0 为 22 个） |
+| 工具面就绪 | 加载时用一次性短连接发现工具面并缓存到 `$DSH_HOME/storages/engram-bridge/tools.json`（含 `command`/`args` 指纹），下次启动的首个请求即带全量工具；工作区连接保持懒启动 |
+| 按工作区连接池 | 每个会话工作区一个 engram 子进程（cwd = 工作区）：懒启动、single-flight、串行启动 + 重试、空闲回收、按上限 LRU 淘汰 |
+| 会话绑定 | `agent/session-start` → `mem_session_start({ id: dsh 会话 id, directory: 工作区 })`，读回 engram 解析出的 project；绑定是工具调用的屏障 |
+| 隐式参数注入 | 声明 `project` 的工具注入项目名；`mem_session_start` 注入 `directory`，其 `id` 由插件强制；声明 `session_id` 的工具注入当前 dsh 会话 id。调用方显式传参优先 |
+| 被动捕获 | `agent/turn-stopping` 取该回合最后一条未被中断的助手文本，交给 `mem_capture_passive`（`source: dsh-turn-stopping`）；同一 (会话, 回合) 只捕获一次 |
+| 压缩恢复 | `compaction/summary` → `mem_session_summary`（摘要文本直接落库）；`compaction/end` 未报错时用 `mem_context` 取最近记忆，按 `recoveryTokenBudget` 截断后注入 |
+| 子 agent 隔离 | 子 agent 会话中 engram 工具从模型可见工具面消失，经 `mcp_call` 之类旁路的调用也会被拒 |
+| 失败降级 | engram 缺失 / 握手失败 / 超时 → 不注册工具 + 一条错误日志，不阻断模型轮次 |
+| 卸载 | 连接池、会话状态与已注册工具随插件卸载一并释放 |
 
 ## 安装
 
 ```bash
 # <repo> = 本仓库的绝对路径
-# 三个 profile 都要装（以 link: 方式）
 dsh plugin --profile web         add <repo>
 dsh plugin --profile headless    add <repo>
 dsh plugin --profile open-design add <repo>
 ```
 
-包自带 `dsh.bundle.patch`（`cordis.patch.yml`），安装后由它插入 `engram-bridge` entry。
-`~/.dsh/cordis.patch.yml` **只保留对该 entry 的 config 覆盖**，不要再手写 `insert`。
-
-> **迁移注意**：旧的手抄副本 `dsh-engram-session-v2` 与本插件都注册 `mcp__engram__*`，**不能并存**（同层重名会让注册失败）。切换必须"装新 + 关旧"在同一次重启前完成。
+包自带 `dsh.bundle.patch`（`cordis.patch.yml`），安装后由它插入 `engram-bridge` entry；`~/.dsh/cordis.patch.yml` 只保留对该 entry 的 config 覆盖，不要重复写 `insert`。
 
 ## 配置
 
@@ -75,50 +47,12 @@ dsh plugin --profile open-design add <repo>
 | `compactionRecovery` | `true` | 压缩时持久化摘要并在压缩后注入记忆 |
 | `recoveryTokenBudget` | `800` | 压缩后注入的 token 预算 |
 
-项目名解析顺序：**显式参数 > `projectOverrides` > 该会话由 engram 解析出的项目名 > `ENGRAM_PROJECT` > 不注入**。插件**永不**用目录名兜底——engram 对未认账的项目名会硬失败（实测 `unknown_project`）。
+项目名解析顺序：**显式参数 > `projectOverrides` > 该会话由 engram 解析出的项目名 > `ENGRAM_PROJECT` > 不注入**。插件不用目录名兜底；`mem_save_prompt` 的 `project` 不注入（保留给歧义恢复）。
 
-## 开发
+## 模型可见影响
 
-```bash
-pnpm install                # 顺带启用 .githooks（prepare → core.hooksPath）
-pnpm typecheck              # tsc --noEmit
-pnpm test                   # 构建后跑单测
-ENGRAM_LIVE=1 pnpm test     # 追加真实 engram 集成测试（临时 ENGRAM_DATA_DIR，不碰 ~/.engram）
-pnpm build                  # tsc → dist/
-pnpm check:hygiene          # 门禁：全历史扫描（推送前必过）
-```
-
-### 隐私门禁
-
-提交/推送会被两层钩子拦一次（`.githooks/`，`pnpm install` 自动启用）：
-
-| 钩子 | 扫描对象 | 拦截 |
-| --- | --- | --- |
-| `pre-commit` | 暂存区内容 + 待提交身份 | 密钥（secretlint 预设）、本机用户路径、个人邮箱、禁止提交的路径、非 noreply 提交身份 |
-| `pre-push` | 全部 blob + 全部 commit message | 同上，覆盖「已经进了历史」的情况 |
-
-- 全历史手动复核：`pnpm check:hygiene`（CI 同样跑这条，`.github/workflows/hygiene.yml` 用 `fetch-depth: 0` 保证扫得到历史）。
-- 规则在 `scripts/check-hygiene.mjs`，密钥规则来自 `.secretlintrc.json`。
-- 文档确需引用某个字面量时，在该行加 `hygiene-allow` 注释跳过。
-- 紧急绕过：`git commit --no-verify` / `git push --no-verify`（下一次 pre-push / CI 仍会抓到）。
-
-加载/卸载验证：
-
-```bash
-dsh --profile web --dump-config | grep engram-bridge   # 应恰好出现一次
-dsh web                                                # 看启动日志中的插件加载行
-```
-
-## Spec-first
-
-走 OpenSpec（`openspec/`），但**不走 Theseus 完整工作流**（无 gate 链）。本变更已归档：`openspec/changes/archive/2026-09-09-engram-bridge-p0/`；长期规格在 `openspec/specs/engram-*/`。
-
-```bash
-openspec list
-openspec validate --specs --strict
-openspec view
-```
-
-## 与 engram 版本的关系
-
-当前针对 engram **1.20.0**（本机 Homebrew 版）。升级前请按 `docs/engram-upgrade-checklist.md` 回归——本插件的关键行为依赖 engram 的解析与 session 语义，而这些语义在版本间有过变化（例如文档声明"已结束会话不可重开"，1.20.0 实测却可重开）。
+- **工具**：engram 工具以 `mcp__engram__*` 出现在模型工具面；对子 agent 不可见。
+- **隐式参数**：见「能力」表与项目名解析顺序；调用方显式传参一律不覆盖，`mem_session_start` 的 `id` 由插件持有。
+- **提示词**：不新增 system prompt 段；压缩恢复通过 `agent.inject()` 注入一条 user 消息，落在会话日志里可重建。
+- **会话日志**：不新增事件类型。
+- **失败**：engram 不可用时相关能力失效并记日志，不阻断模型轮次。

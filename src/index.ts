@@ -302,15 +302,17 @@ export function apply(ctx: PluginContext, config: EngramConfig): void {
   const discovery = (async (): Promise<void> => {
     let client: McpClient | undefined;
     try {
-      client = await McpClient.connect({
-        command: config.command,
-        args: config.args,
-        env: config.env,
-        cwd: homedir(),
-        requestTimeoutMs: config.toolCallTimeoutMs,
-        clientName: name,
-        logger: log,
-      });
+      client = await pool.runExclusive(() =>
+        McpClient.connect({
+          command: config.command,
+          args: config.args,
+          env: config.env,
+          cwd: homedir(),
+          requestTimeoutMs: config.toolCallTimeoutMs,
+          clientName: name,
+          logger: log,
+        }),
+      );
       registerTools(client.tools, 'discovery');
       writeToolCache(cachePath, fingerprint, client.tools);
     } catch (error) {

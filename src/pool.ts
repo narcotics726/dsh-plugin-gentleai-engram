@@ -96,6 +96,16 @@ export class ConnectionPool {
     return closed;
   }
 
+  /**
+   * Run work that spawns an engram child outside the pool under the same
+   * serialization as pool spawns. Concurrent starts against one SQLite file can
+   * fail transiently with `database is locked` (observed), so a load-time
+   * discovery must not race the first workspace connection.
+   */
+  runExclusive<T>(work: () => Promise<T>): Promise<T> {
+    return this.#serialized(work);
+  }
+
   /** Close every connection and refuse further acquisitions. */
   dispose(): void {
     this.#disposed = true;

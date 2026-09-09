@@ -87,7 +87,14 @@ function fakeAgent(sessionId: string, events: WireEvent[]) {
 
 async function waitFor(check: () => boolean, timeoutMs = 15000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  while (!check()) {
+  for (;;) {
+    let ok = false;
+    try {
+      ok = check();
+    } catch {
+      ok = false; // e.g. the engram DB file does not exist yet
+    }
+    if (ok) return;
     if (Date.now() > deadline) throw new Error('waitFor timed out');
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
@@ -96,22 +103,26 @@ async function waitFor(check: () => boolean, timeoutMs = 15000): Promise<void> {
 test('live wiring: session start, capture and compaction recovery', { skip: !live }, async () => {
   rmSync(dataDir, { recursive: true, force: true });
   mkdirSync(dataDir, { recursive: true });
+  // Isolate the tool-surface cache too: the plugin reads it from $DSH_HOME.
+  const previousHome = process.env.DSH_HOME;
+  process.env.DSH_HOME = join(dataDir, 'dsh-home');
   const host = fakeHost();
   const { ctx, handlers, registrations, logs } = host;
-  apply(ctx as never, {
-    command: engramBin,
-    args: ['mcp'],
-    env: { ENGRAM_DATA_DIR: dataDir, ENGRAM_NO_UPDATE_CHECK: '1' },
-    toolCallTimeoutMs: 20000,
-    poolMaxConnections: 2,
-    poolMaxIdleMs: 60000,
-    projectOverrides: {},
-    injectSessionProject: true,
-    injectSessionId: true,
-    capturePassive: true,
-    compactionRecovery: true,
-    recoveryTokenBudget: 800,
-  });
+  try {
+    apply(ctx as never, {
+        command: engramBin,
+      args: ['mcp'],
+      env: { ENGRAM_DATA_DIR: dataDir, ENGRAM_NO_UPDATE_CHECK: '1' },
+      toolCallTimeoutMs: 20000,
+      poolMaxConnections: 2,
+      poolMaxIdleMs: 60000,
+      projectOverrides: {},
+      injectSessionProject: true,
+      injectSessionId: true,
+      capturePassive: true,
+      compactionRecovery: true,
+      recoveryTokenBudget: 800,
+    });
 
   const events: WireEvent[] = [];
   const agent = fakeAgent('wire-1', events);
@@ -173,10 +184,14 @@ test('live wiring: session start, capture and compaction recovery', { skip: !liv
   await waitFor(() => agent.injected.length === 1);
   assert.ok((agent.injected[0] ?? '').length > 0);
 
-  db.close();
-  host.disposeAll();
-  rmSync(dataDir, { recursive: true, force: true });
-  assert.ok(!logs.some((line) => line.startsWith('error:')), `no degradation logs: ${logs.join(' | ')}`);
+    db.close();
+    assert.ok(!logs.some((line) => line.startsWith('error:')), `no degradation logs: ${logs.join(' | ')}`);
+  } finally {
+    host.disposeAll();
+    rmSync(dataDir, { recursive: true, force: true });
+    if (previousHome === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = previousHome;
+  }
 });
 
 test('live wiring: engram unavailable degrades with zero tools and one log', { skip: !live }, async () => {

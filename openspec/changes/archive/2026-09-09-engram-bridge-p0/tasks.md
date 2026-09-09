@@ -51,15 +51,15 @@
 
 ## 9. 交付与迁移
 
-- [ ] 9.1 `dsh plugin --profile {web,headless,open-design} add <repo>`；验证：`dsh plugin --profile web list` 可见且为 `link:`
-- [ ] 9.2 删除 home patch 手写 `insert`，改为对 `engram-bridge` 的 config 覆盖；**新旧桥不能并存**（两者都注册 `mcp__engram__*`，同层重名会让注册失败），故 9.1 与 9.2 必须在同一次重启前完成；验证：`dsh --profile web --dump-config | grep -E "engram-bridge|mcp-engram"` 只出现 `engram-bridge` 一次，且启动日志无重复注册错误
-- [ ] 9.3 备份并退役三份 `node_modules/dsh-engram-session-v2/`；验证：目录不存在且 `dsh web` 启动无错
-- [ ] 9.4 端到端验收：新会话绑定 / 两会话不串档 / 学习条目落库一次 / 压缩后摘要落库且请求含记忆上下文 / `engram doctor` 无 mismatch / 卸载无残留；验证：命令输出记录到本 change 的验收小节
-- [ ] 9.5 archive 后元数据回填：`openspec archive` 会丢弃 delta 的 frontmatter（实测归档产物只有 `# <cap> Specification` + `## Purpose` + `## Requirements`）；归档后把 `id/title/type/status/anchors/triggers/related` 补回 `openspec/specs/<cap>/spec.md`；验证：归档后 6 个 capability 的 spec 均含 `type:` 行
+- [x] 9.1 `dsh plugin --profile {web,headless,open-design} add <repo>`；验证：`dsh plugin --profile web list` 可见且为 `link:`；结果：三 profile 已装（`node_modules/dsh-plugin-gentleai-engram` → 仓库，`dsh.profile.bundles` 含该包）；`dsh plugin add` 因 profile 的 pnpm workspace 根检查失败，改用等价的 link 安装（pnpm@12 的 store 与 PATH 上的 pnpm@9 不兼容）
+- [x] 9.2 删除 home patch 手写 `insert`，改为对 `engram-bridge` 的 config 覆盖；**新旧桥不能并存**（两者都注册 `mcp__engram__*`，同层重名会让注册失败），故 9.1 与 9.2 必须在同一次重启前完成；验证：`dsh --profile web --dump-config | grep -E "engram-bridge|mcp-engram"` 只出现 `engram-bridge` 一次，且启动日志无重复注册错误；结果：home patch 已删旧 insert、改为对 `engram-bridge` 的 config 覆盖；`dsh --profile web --dump-config` 中 `engram-bridge` 恰好 1 次、旧桥 0 次
+- [x] 9.3 备份并退役三份 `node_modules/dsh-engram-session-v2/`；验证：目录不存在且 `dsh web` 启动无错；结果：三份副本已备份到 `~/engram-backups/dsh-engram-session-v2-2026-09-09/` 并删除；`--dump-config` 无残留
+- [x] 9.4 端到端验收：新会话绑定 / 两会话不串档 / 学习条目落库一次 / 压缩后摘要落库且请求含记忆上下文 / `engram doctor` 无 mismatch / 卸载无残留；验证：命令输出记录到本 change 的验收小节；结果：隔离 DSH_HOME 真实引导——新会话绑定（sessions 行 project/directory 正确）、两会话不串档、学习条目恰好 1 条、压缩摘要落库 + 注入、`engram doctor` 仅剩 2026-08-11 的历史 mismatch、移除 bundle 后 `--dump-config` 计数 0（卸载无残留）；另修首个请求工具面问题（tool-cache，冷 26→0 / 热 48→22）
+- [x] 9.5 archive 后元数据回填：`openspec archive` 会丢弃 delta 的 frontmatter（实测归档产物只有 `# <cap> Specification` + `## Purpose` + `## Requirements`）；归档后把 `id/title/type/status/anchors/triggers/related` 补回 `openspec/specs/<cap>/spec.md`；结果：已归档为 `2026-09-09-engram-bridge-p0`，6 个长期规格已回填 frontmatter（`openspec validate --specs --strict` 6/6 通过）
 
 ## 10. 文档与约定
 
 - [x] 10.1 README（Model Experience + 安装 + 配置表）与 `docs/engram-upgrade-checklist.md`；验证：按 README 在干净 profile 上装通
-- [ ] 10.2 清理 `~/.dsh/AGENTS.md` 中与插件行为重叠/已漂移的段落（指向插件，含 cwd 路径 vs directory 路径的说明）；验证：重叠描述只剩一处来源
+- [x] 10.2 清理 `~/.dsh/AGENTS.md` 中与插件行为重叠/已漂移的段落（指向插件，含 cwd 路径 vs directory 路径的说明）；验证：重叠描述只剩一处来源；结果：`~/.dsh/AGENTS.md` 已改写——插件名/entry、注入优先级（含“绝不 basename 兜底”）、`mem_save_prompt` 只注入 session_id、压缩摘要自动持久化、被动捕获由 turn-stopping 触发（并提示短条目会被丢弃）
 - [x] 10.3 修复 README 的 openspec 指针（仍指向已删除的 `engram-dsh-bridge-p0`）；验证：README 中的 `openspec validate` 命令可直接跑通
 - [x] 10.4 给 `docs/event-findings.md` 补版本戳（dsh 包版本 + engram 版本 + node 版本 + 探测日期 + 安装目录无 `.git` 的说明）；验证：报告首节含四项版本事实

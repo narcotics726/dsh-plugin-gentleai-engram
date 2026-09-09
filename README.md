@@ -95,11 +95,11 @@ dsh web                                                # 看启动日志中的�
 
 ## Spec-first
 
-走 OpenSpec（`openspec/`），但**不走 Theseus 完整工作流**（无 gate 链）。当前变更：`openspec/changes/engram-bridge-p0/`。
+走 OpenSpec（`openspec/`），但**不走 Theseus 完整工作流**（无 gate 链）。本变更已归档：`openspec/changes/archive/2026-09-09-engram-bridge-p0/`；长期规格在 `openspec/specs/engram-*/`。
 
 ```bash
 openspec list
-openspec validate engram-bridge-p0 --strict
+openspec validate --specs --strict
 openspec view
 ```
 

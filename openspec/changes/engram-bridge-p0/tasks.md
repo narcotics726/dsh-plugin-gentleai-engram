@@ -47,7 +47,7 @@
 - [x] 8.2 摘要持久化：`session/event` → `compaction/summary` → `mem_session_summary`（归属当前会话），按 `compactionId` 幂等；验证：单测 + 实测压缩后 engram 该会话 summary 等于摘要内容
 - [x] 8.3 压缩后注入：`compaction/end` 成功后取 `mem_context`，按 `recoveryTokenBudget` 截断后注入；验证：实测压缩后请求含上下文，超预算时被截断
 - [x] 8.4 开关与降级：`compactionRecovery=false` 不处理；失败只记日志；验证：单测覆盖两分支
-- [ ] 8.5 校准 `recoveryTokenBudget`：用真实压缩摘要长度实测并给出取值理由；验证：design Risks 中该条目替换为实测值
+- [x] 8.5 校准 `recoveryTokenBudget`：用真实压缩摘要长度实测并给出取值理由；结果：实测 `mem_context` 输出 4635 字符 ≈ 1159 tokens，默认 800 保留约 2/3；已写入 design Risks
 
 ## 9. 交付与迁移
 

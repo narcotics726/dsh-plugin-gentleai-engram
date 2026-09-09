@@ -60,7 +60,7 @@
 - [不新增 system prompt 段 → 模型仍依赖 AGENTS.md 的自觉] → P0 清理重叠段落，P1 用 `agent.inject()` 补上。
 - [启动任意 dsh profile 会重写 `$DSH_HOME/profiles/<name>/cordis.yml`] → 探针与验证必须重定向 `DSH_HOME`（探针即如此）；安装步骤本身写 `~/.dsh`，属预期行为。
 - [压缩后注入依赖 `agent.inject()` 在同一回合内可见] → tasks 8.1 先探针；不可见则退化为"仅持久化摘要"或"下一回合开始注入"。
-- [`recoveryTokenBudget` 为先验值] → tasks 8.5 用真实压缩摘要长度校准。
+- [`recoveryTokenBudget` 默认 800] → 实测本项目的 `mem_context` 输出 4635 字符 ≈ 1159 tokens（2026-09-09），故 800 会把注入裁到约 2/3；它只是"提示"，模型仍可 `mem_search` 取更多。若实际项目普遍更大，再调高。
 
 ## Migration Plan
 

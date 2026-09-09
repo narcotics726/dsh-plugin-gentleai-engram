@@ -20,7 +20,7 @@
 
 - [x] 4.1 注册 `mcp__engram__*`，名称/描述/参数 schema 与 engram 声明一致，结果按 dsh 形状返回；验证：实测 `dsh` 中模型可见工具数与 engram `tools/list` 一致
 - [x] 4.2 子 agent 遮蔽（按 1.2 结论实现）+ 旁路兜底；验证：创建子代理后其工具面不含 `mcp__engram__*`（或经 `mcp_call` 调用被拒）
-- [ ] 4.4 旁路探针：验证 `mcp_call({tool:'mcp__engram__mem_save'})` 在子 agent 中是否绕过 `restrict`；"不能绕过"则删除 per-agent `guard`（去掉无失效模式的防御），"能绕过"则保留并让 spec 的旁路场景有实现支撑；验证：探针日志 + design Decisions 8 更新
+- [x] 4.4 旁路探针：验证 `mcp_call({tool:'mcp__engram__mem_save'})` 在子 agent 中是否绕过 `restrict`；"不能绕过"则删除 per-agent `guard`（去掉无失效模式的防御），"能绕过"则保留并让 spec 的旁路场景有实现支撑；结果：**不能绕过** —— `dsh-mcp-adapter` 用调用者身份解析目标（源码 `resolve(name, exec.agent)`），restriction 同时覆盖旁路，故**删除 per-agent guard**（design Decisions 8 / Risks 已更新，测试断言不再注册 guard）
 - [x] 4.3 卸载回收：`ctx.effect` 关闭全部子进程并注销工具；验证：停用后无 engram 子进程残留（`pgrep -f 'engram mcp'` 为空）
 
 ## 5. 会话绑定

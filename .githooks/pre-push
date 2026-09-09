@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+# Repository hygiene gate: every blob and every commit message, i.e. everything
+# that is about to become public. Bypass for one push: git push --no-verify
+exec node "$(git rev-parse --show-toplevel)/scripts/check-hygiene.mjs" --history

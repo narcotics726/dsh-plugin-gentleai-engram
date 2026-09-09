@@ -8,15 +8,38 @@
 #   PROBE_ABORT_AFTER_CHARS=8
 #   PROBE_KEEP_HOME=1   keep the throwaway DSH home for inspection
 #   PROBE_EXTRA_PATCHES extra --patch overlays, space separated (e.g. probe-compact.cordis.yml)
+#   PROBE_LLM_MODULE   override the resolved @deepseek-ai/dsh-llm entry path
 #
-# The throwaway home lives under scripts/probe/tmp/dsh-home and is recreated on
-# every run: ~/.dsh is never read for state beyond the credential and settings
-# documents copied in below, and is never written.
+# The runner exports PROBE_PLUGIN_MODULE / PROBE_LLM_MODULE (absolute paths) for
+# probe.cordis.yml; the checked-in overlay itself holds no local path.
+#
+# The throwaway home lives OUTSIDE the repository (default
+# $TMPDIR/dsh-engram-probe-home) and is recreated on every run: it holds a copy
+# of ~/.dsh/.credentials.yaml, which must never land in git history. ~/.dsh is
+# never read for state beyond the credential and settings documents copied in
+# below, and is never written.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-PROBE_HOME="${PROBE_HOME:-$REPO/scripts/probe/tmp/dsh-home}"
+PROBE_HOME="${PROBE_HOME:-${TMPDIR:-/tmp}/dsh-engram-probe-home}"
 OUT_DIR="$REPO/scripts/probe/out"
+
+# Absolute paths the overlay needs are resolved here, so the checked-in
+# probe.cordis.yml carries no machine-specific path.
+export PROBE_PLUGIN_MODULE="$REPO/scripts/probe/probe-events.mjs"
+if [ -z "${PROBE_LLM_MODULE:-}" ]; then
+  PROBE_LLM_MODULE="$(node -e 'try { process.stdout.write(require.resolve("@deepseek-ai/dsh-llm")) } catch {}' 2>/dev/null || true)"
+fi
+if [ -z "${PROBE_LLM_MODULE:-}" ]; then
+  DSH_BIN_REAL="$(readlink -f "$(command -v dsh)" 2>/dev/null || true)"
+  if [ -n "$DSH_BIN_REAL" ]; then
+    DSH_PKG="$(cd "$(dirname "$DSH_BIN_REAL")/.." && pwd)"
+    if [ -f "$DSH_PKG/node_modules/@deepseek-ai/dsh-llm/lib/index.js" ]; then
+      PROBE_LLM_MODULE="$DSH_PKG/node_modules/@deepseek-ai/dsh-llm/lib/index.js"
+    fi
+  fi
+fi
+export PROBE_LLM_MODULE="${PROBE_LLM_MODULE:-}"
 
 RUN_NAME="${1:?usage: run-probe.sh <run-name> <scenario> \"<task>\"}"
 SCENARIO="${2:?scenario required, e.g. observe|abort|restrict}"

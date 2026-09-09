@@ -9,17 +9,18 @@ throwaway: nothing under `openspec/`, `src/`, `~/.dsh` or `~/.engram` is touched
 | file | role |
 | --- | --- |
 | `probe-events.mjs` | the Cordis plugin under test: subscribes to the agent-plane events and to `session/event`, appends one JSONL line per fact |
-| `probe.cordis.yml` | `--patch` overlay that inserts the plugin as a global row; config comes from `PROBE_*` env |
+| `probe.cordis.yml` | `--patch` overlay that inserts the plugin as a global row; config comes from `PROBE_*` env, with the two absolute paths (`PROBE_PLUGIN_MODULE`, `PROBE_LLM_MODULE`) exported by `run-probe.sh` so the checked-in overlay holds no local path |
 | `probe-compact.cordis.yml` | second overlay that forces `compaction-basic` into pressure (tiny threshold + one-token retained tail) |
 | `run-probe.sh` | bounded runner: builds a throwaway DSH home, boots `dsh --profile headless`, cleans up |
-| `out/*.jsonl` | the raw probe logs the findings quote (kept as evidence) |
+| `out/` | probe run artifacts — **gitignored, never committed**; the findings quote excerpts instead. Machine paths are redacted to `<repo>`/`~` when written |
 
 ## Why a throwaway DSH home
 
 `dsh` rewrites `$DSH_HOME/profiles/<name>/cordis.yml` on **every** boot
 (`prepareProfile` in `@deepseek-ai/dsh-app-boot`), so booting a profile under
-`~/.dsh` mutates it. `run-probe.sh` therefore sets
-`DSH_HOME=<repo>/scripts/probe/tmp/dsh-home`, copies only the two documents a
+`~/.dsh` mutates it. `run-probe.sh` therefore sets a throwaway home
+**outside the repository** (`DSH_HOME=${TMPDIR:-/tmp}/dsh-engram-probe-home`),
+copies only the two documents a
 headless run needs (`~/.dsh/.credentials.yaml`, `~/.dsh/settings.yaml`), and
 deletes the home when the run ends. Bundle rows resolve installation-first, so
 the throwaway profile needs no `pnpm install`:

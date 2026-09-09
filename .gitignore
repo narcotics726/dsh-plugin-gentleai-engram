@@ -2,3 +2,13 @@ node_modules/
 dist/
 *.log
 .DS_Store
+
+# Local-only DSH homes used by acceptance/probe runs: they contain a copied
+# .credentials.yaml (API keys, OAuth tokens) and must never be committed.
+.accept/
+scripts/probe/tmp/
+.credentials.yaml
+.pnpm-store/
+
+# Probe run artifacts: local evidence, never committed (see scripts/probe/README.md).
+scripts/probe/out/

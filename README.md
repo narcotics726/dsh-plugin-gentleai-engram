@@ -46,6 +46,7 @@
 ## 安装
 
 ```bash
+# <repo> = 本仓库的绝对路径
 # 三个 profile 都要装（以 link: 方式）
 dsh plugin --profile web         add <repo>
 dsh plugin --profile headless    add <repo>
@@ -79,12 +80,27 @@ dsh plugin --profile open-design add <repo>
 ## 开发
 
 ```bash
-pnpm install
+pnpm install                # 顺带启用 .githooks（prepare → core.hooksPath）
 pnpm typecheck              # tsc --noEmit
 pnpm test                   # 构建后跑单测
 ENGRAM_LIVE=1 pnpm test     # 追加真实 engram 集成测试（临时 ENGRAM_DATA_DIR，不碰 ~/.engram）
 pnpm build                  # tsc → dist/
+pnpm check:hygiene          # 门禁：全历史扫描（推送前必过）
 ```
+
+### 隐私门禁
+
+提交/推送会被两层钩子拦一次（`.githooks/`，`pnpm install` 自动启用）：
+
+| 钩子 | 扫描对象 | 拦截 |
+| --- | --- | --- |
+| `pre-commit` | 暂存区内容 + 待提交身份 | 密钥（secretlint 预设）、本机用户路径、个人邮箱、禁止提交的路径、非 noreply 提交身份 |
+| `pre-push` | 全部 blob + 全部 commit message | 同上，覆盖「已经进了历史」的情况 |
+
+- 全历史手动复核：`pnpm check:hygiene`（CI 同样跑这条，`.github/workflows/hygiene.yml` 用 `fetch-depth: 0` 保证扫得到历史）。
+- 规则在 `scripts/check-hygiene.mjs`，密钥规则来自 `.secretlintrc.json`。
+- 文档确需引用某个字面量时，在该行加 `hygiene-allow` 注释跳过。
+- 紧急绕过：`git commit --no-verify` / `git push --no-verify`（下一次 pre-push / CI 仍会抓到）。
 
 加载/卸载验证：
 

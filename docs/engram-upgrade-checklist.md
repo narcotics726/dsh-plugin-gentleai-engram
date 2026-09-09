@@ -57,7 +57,7 @@ mkdir -p "$ENGRAM_DATA_DIR"
 ## 5. dsh 侧（换 dsh 版本时）
 
 ```bash
-DSH_HOME="$(pwd)/scripts/probe/tmp/dsh-home" ./scripts/probe/run-probe.sh smoke smoke "hello"
+./scripts/probe/run-probe.sh smoke smoke "hello"   # runner 自建仓库外的 throwaway DSH_HOME
 ```
 
 复测四项（详见 `docs/event-findings.md`）：中止回合是否触发 `agent/turn-stopping`、`agent/created` 窗口能否 `restrict`、`session-start` 的 source 集合、`session-start` 是否先于首个回合。

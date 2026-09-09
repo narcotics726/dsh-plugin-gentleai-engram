@@ -4,13 +4,14 @@ Runtime probe of the installed dsh build, answering four questions about the
 agent-plane event surface. Everything here is **observed**, not inferred from
 source, unless a paragraph says otherwise.
 
-- Harness: `@deepseek-ai/dsh@0.1.2-rc.1` at
-  `<dsh-install-root>`
+- Harness: `@deepseek-ai/dsh@0.1.2-rc.1` at the global install root
+  (`<dsh-install-root>`, typically `$(npm root -g)/@deepseek-ai/dsh`)
 - Profile: a throwaway `headless` profile (`@deepseek-ai/dsh-base` +
   `@deepseek-ai/dsh-headless`), booted with
   `dsh --profile headless --patch scripts/probe/probe.cordis.yml "<task>"`
 - Probe plugin: `scripts/probe/probe-events.mjs` (global `ctx.on` listeners on
-  `agent/*` and `session/event`), logs to `scripts/probe/out/*.jsonl`
+  `agent/*` and `session/event`), logs to `scripts/probe/out/` — **gitignored, the
+  raw logs are not committed**; every excerpt below is quoted from a real run
 - dsh package version: `0.1.2-rc.1`; the global install has **no `.git`**, so no commit hash exists
 - engram: `1.20.0` (`/opt/homebrew/bin/engram` → `Cellar/engram/1.20.0/bin/engram`)
 - node: `v26.7.0`; probed 2026-09-09
@@ -19,8 +20,9 @@ source, unless a paragraph says otherwise.
 
 **Why a throwaway DSH home:** `dsh` rewrites
 `$DSH_HOME/profiles/<name>/cordis.yml` on every boot, and this session's file
-sandbox forbids writes under `~/.dsh`. All runs therefore used
-`DSH_HOME=<repo>/scripts/probe/tmp/dsh-home` with only
+sandbox forbids writes under `~/.dsh`. All runs therefore use a throwaway
+home **outside the repository** (`DSH_HOME=${TMPDIR:-/tmp}/dsh-engram-probe-home`)
+with only
 `.credentials.yaml`/`settings.yaml` copied in. `~/.dsh` was never written
 (its `profiles/headless/cordis.yml` mtime stayed `Sep 7 14:29`).
 
@@ -42,7 +44,7 @@ The probe counts `text-delta` chars on `session/event assistant/chunk` for the
 root agent and calls `agent.cancel({ kind: 'user' })` at 14 chars — i.e. strictly
 mid-stream, while the adapter is still producing output.
 
-### Evidence — aborted turn (`out/abort.jsonl`, 15 lines total)
+### Evidence — aborted turn (the `abort` run, 15 lines total)
 
 ```jsonl
 84.3  {"ev":"agent","type":"agent/session-start",…,"source":"startup"}
@@ -60,7 +62,7 @@ assembled before cancellation. **No `agent/turn-stopping` line exists anywhere i
 this log** — the only agent-plane events are `agent/created`, `agent/session-start`,
 `agent/status(running)`, `agent/status(idle)`.
 
-### Evidence — normal 2-step turn (`out/multistep.jsonl`)
+### Evidence — normal 2-step turn (the `multistep` run)
 
 ```jsonl
 928.2  {"ev":"session","type":"assistant/message",…,"step":1,"interrupted":false,"blocks":["tool-call"]}
@@ -74,11 +76,11 @@ this log** — the only agent-plane events are `agent/created`, `agent/session-s
 
 One `turn-stopping` for the whole 2-step turn, after the turn's last
 `assistant/message` (1539.8) and `step/end` (1541.3), before `turn/end` (1543.8).
-Same ordering in the 1-step `out/smoke.jsonl` run (message 697.4 → step/end 698.6
-→ turn-stopping 699.4 → turn/end 699.6) and in the child/parent turns of
-`out/subagent-restrict.jsonl`.
+Same ordering in the 1-step `smoke` run (message 697.4 → step/end 698.6
+→ turn-stopping 699.4 → turn/end 699.6) and in the child/parent turns of the
+`subagent-restrict` run.
 
-### Evidence — the "exactly once" exception (`out/steer.jsonl`)
+### Evidence — the "exactly once" exception (the `steer` run)
 
 The probe steers once from inside the first `turn-stopping` listener:
 
@@ -122,7 +124,7 @@ the child's model-facing catalog** (26 → 23 tool schemas in its logged
 A real in-process spawn through the base `subagent` tool
 (`@deepseek-ai/dsh-tool-subagent` → `@deepseek-ai/dsh-subagent-spawn-in-process`).
 
-### Evidence — header readable at `agent/created` (`out/subagent-restrict.jsonl`)
+### Evidence — header readable at `agent/created` (the `subagent-restrict` run)
 
 ```jsonl
 1072.1 {"ev":"agent","type":"agent/created","sid":"f2e15d83-a64d-4001-a9c1-e7d1c9e13725",
@@ -201,7 +203,7 @@ where `probe-compact.cordis.yml` overrides the `compaction-basic` row
 (`auto: true`, `thresholdRatio: 0.001`, `retainTokens: 1`) so the step-boundary
 pressure check fires on a short conversation.
 
-### Evidence — compaction happened, no session-start (`out/compact.jsonl`)
+### Evidence — compaction happened, no session-start (the `compact` run)
 
 ```jsonl
 80.4   {"ev":"agent","type":"agent/session-start",…,"source":"startup","commands":["compact","feedback","goal","permission","plan"]}
@@ -269,13 +271,13 @@ ordering was `agent/created` → `agent/session-start` → `agent/status(running
 
 | run | `agent/session-start` | first `turn/start` | first `step/start` |
 | --- | --- | --- | --- |
-| `out/smoke.jsonl` | 88.8 (`startup`) | 90.4 | 162.2 |
-| `out/multistep.jsonl` | 81.4 (`startup`) | 82.7 | 154.1 |
-| `out/abort.jsonl` | 84.3 (`startup`) | 85.7 | 155.1 |
-| `out/compact.jsonl` | 80.4 (`startup`) | 81.9 | 156.2 |
-| `out/subagent-restrict.jsonl` (child) | 1077.0 (`startup`) | 1080.3 | 1134.8 |
+| `smoke` | 88.8 (`startup`) | 90.4 | 162.2 |
+| `multistep` | 81.4 (`startup`) | 82.7 | 154.1 |
+| `abort` | 84.3 (`startup`) | 85.7 | 155.1 |
+| `compact` | 80.4 (`startup`) | 81.9 | 156.2 |
+| `subagent-restrict` (child) | 1077.0 (`startup`) | 1080.3 | 1134.8 |
 
-Verbatim from `out/smoke.jsonl`:
+Verbatim from the `smoke` run:
 
 ```jsonl
 88.5 {"ev":"agent","type":"agent/created",…}

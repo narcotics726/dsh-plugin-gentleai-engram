@@ -25,8 +25,10 @@ dsh（Cordis）插件：把 engram MCP 后端接入 dsh。**接入层，不是�
 
 ```bash
 pnpm typecheck && pnpm test && pnpm build
+pnpm check:hygiene            # 门禁：全历史扫密钥/本机路径/个人邮箱/禁止路径
 ```
 
+- 门禁：`.githooks/pre-commit`（暂存区 + 提交身份）与 `.githooks/pre-push`（全历史）由 `pnpm install` 的 `prepare` 自动启用（`core.hooksPath=.githooks`）；推送前 `pnpm check:hygiene` 必须通过。
 - 加载验证：`dsh --profile web --dump-config | grep engram-bridge`（恰好一次）→ 启动 `dsh web` 看加载日志。
 - 卸载验证：停用后 `--dump-config` 无残留，且会话不报错。
 

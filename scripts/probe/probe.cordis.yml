@@ -3,12 +3,17 @@
 #
 # PROBE_OUT is required (JSONL sink). PROBE_SCENARIO / PROBE_DENY /
 # PROBE_ABORT_AFTER_CHARS select the behaviour under test.
+#
+# The two machine-specific absolute paths live in the environment, not in this
+# file: PROBE_PLUGIN_MODULE (this overlay's plugin) and PROBE_LLM_MODULE (needed
+# by the steer/abort scenarios). run-probe.sh exports both, so the checked-in
+# overlay stays portable.
 - insert:
     - id: probe-events
-      name: '<repo>/scripts/probe/probe-events.mjs'
+      name: !!js process.env.PROBE_PLUGIN_MODULE
       config:
         out: !!js process.env.PROBE_OUT
         scenario: !!js process.env.PROBE_SCENARIO ?? 'observe'
         deny: !!js process.env.PROBE_DENY ?? ''
         abortAfterChars: !!js Number(process.env.PROBE_ABORT_AFTER_CHARS ?? '8')
-        llmModule: !!js process.env.PROBE_LLM_MODULE ?? '<dsh-install-root>/node_modules/@deepseek-ai/dsh-llm/lib/index.js'
+        llmModule: !!js process.env.PROBE_LLM_MODULE ?? ''

@@ -37,6 +37,17 @@ export function apply(ctx, config) {
 
   mkdirSync(dirname(out), { recursive: true })
 
+  // Probe logs are committed as evidence, so machine-specific paths are
+  // redacted on write: the repository root becomes '<repo>' and the home
+  // directory becomes '~'.
+  const repoRoot = process.env.PROBE_REPO_ROOT ?? process.cwd()
+  const homeDir = process.env.HOME ?? ''
+  const redactPath = (value) => {
+    if (typeof value !== 'string') return value ?? null
+    const out = homeDir && value.startsWith(homeDir) ? '~' + value.slice(homeDir.length) : value
+    return out.split(repoRoot).join('<repo>')
+  }
+
   const t0 = process.hrtime.bigint()
   let i = 0
   const write = (record) => {
@@ -74,7 +85,7 @@ export function apply(ctx, config) {
       parentSession: header.parentSession ?? null,
       isSeeded: header.isSeeded ?? null,
       agentPreset: header.agentPreset ?? null,
-      cwd: header.cwd ?? null,
+      cwd: redactPath(header.cwd),
       headerKeys: Object.keys(header),
       catalog: toolNames(agent),
     })

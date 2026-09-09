@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+# Repository hygiene gate: staged content, staged paths, pending commit identity.
+# Bypass for one commit (deliberate, logged): git commit --no-verify
+exec node "$(git rev-parse --show-toplevel)/scripts/check-hygiene.mjs" --staged

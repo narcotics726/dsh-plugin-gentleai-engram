@@ -35,7 +35,7 @@
 
 ## Decisions
 
-1. **按工作区池化 engram 子进程，cwd = 会话工作区。** 因为 `mem_capture_passive` / `mem_session_end` 只认进程 cwd 且没有可注入的 project 参数（实测 + DOCS L826），单进程多工作区必然把记忆写进错误的项目。替代方案：单进程 + 全程显式注入（对这两个工具无效）；每会话一进程（进程数随会话增长，收益相同）。
+1. **按工作区池化 engram 子进程，cwd = 会话工作区。** 因为 `mem_capture_passive` / `mem_session_end` 的**项目**只认进程 cwd、且没有可注入的 project 参数（归属另由传入的 `session_id` 决定；实测 + DOCS L826），单进程多工作区必然把记忆写进错误的项目。替代方案：单进程 + 全程显式注入（对这两个工具无效）；每会话一进程（进程数随会话增长，收益相同）。
 2. **懒启动 + 并发去重 + 串行启动与重试。** 工作区集合在启动时未知（`SessionHeader.cwd` 由会话创建时决定）；实测观察到启动期瞬时数据库锁失败，故启动需串行化并允许重试。空闲回收与连接上限见配置。
 3. **项目名由 engram 解析一次，插件缓存并全程显式注入。** git 仓库的项目名可能是 engram 存储的 binding label（DOCS L792-793），插件无法从文件系统复制；且显式 project 是 validated selection，猜错会硬失败（实测 `unknown_project`）。替代方案（插件自判：读 `.engram/config.json` + git + basename）在 git_remote / monorepo / binding 三种情形会错。
 4. **注入优先级**：显式参数 > `projectOverrides[工作区]` > 会话解析结果 > `ENGRAM_PROJECT` > 不注入。绝不使用目录名兜底（实测该兜底会产出 engram 不认账的名字）。与 `~/.dsh/AGENTS.md` 不矛盾：AGENTS.md 写的是 engram 的 **cwd 路径**（实测 `ENGRAM_PROJECT` 在该路径胜出，`project_source: process_override`），本插件走的是 **directory 路径**（实测 directory 胜出，`git_root`）。AGENTS.md 需按 tasks 10.2 改写为指向本 spec：旧文描述的是 cwd 路径（`ENGRAM_PROJECT` > 目录检测），本 spec 管的是 directory 路径（directory > `ENGRAM_PROJECT`），且**删除 basename 兜底**（插件永不注入未经 engram 认账的项目名）。

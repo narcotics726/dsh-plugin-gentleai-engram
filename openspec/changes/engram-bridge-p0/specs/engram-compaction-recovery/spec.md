@@ -38,7 +38,7 @@ related:
 
 #### Scenario: 一次压缩完成
 - **WHEN** 一次压缩产生 `compaction/summary` 事件
-- **THEN** engram 中当前会话的 summary 等于该事件的摘要内容
+- **THEN** engram 中该会话下出现一条会话摘要记录，其内容等于该事件的摘要内容
 
 #### Scenario: 压缩失败
 - **WHEN** `compaction/end` 携带错误

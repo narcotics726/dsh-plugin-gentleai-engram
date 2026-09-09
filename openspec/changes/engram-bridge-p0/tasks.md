@@ -6,47 +6,47 @@
 
 ## 2. 仓库骨架
 
-- [ ] 2.1 `package.json`（含 `dsh.bundle.patch`）+ `cordis.patch.yml`（`id: engram-bridge`）+ `tsconfig.json` 就位；验证：`pnpm install && pnpm typecheck` 通过
+- [x] 2.1 `package.json`（含 `dsh.bundle.patch`）+ `cordis.patch.yml`（`id: engram-bridge`）+ `tsconfig.json` 就位；验证：`pnpm install && pnpm typecheck` 通过
 - [ ] 2.3 校准池默认值：在普通 shell 用 `ps -o rss= -p $(pgrep -f "engram mcp")` 实测每进程 RSS（本会话沙箱禁用 `ps`），据此定 `poolMaxConnections`/`poolMaxIdleMs`；完成标准：≥3 进程实测数据 + 写入 design 的取值理由；验证：design Risks 中"先验值"条目被实测值替换
-- [ ] 2.2 `src/index.ts` 导出 `name`/`inject`/`apply` 与 Schemastery `Config`（含 `command`/`args`/`env`/`toolCallTimeoutMs`/`poolMaxIdleMs`/`poolMaxConnections`/`projectOverrides`/`injectSessionProject`/`injectSessionId`/`capturePassive`）；验证：`pnpm build` 产出 `dist/index.js` 且可 `import`
+- [x] 2.2 `src/index.ts` 导出 `name`/`inject`/`apply` 与 Schemastery `Config`（含 `command`/`args`/`env`/`toolCallTimeoutMs`/`poolMaxIdleMs`/`poolMaxConnections`/`projectOverrides`/`injectSessionProject`/`injectSessionId`/`capturePassive`）；验证：`pnpm build` 产出 `dist/index.js` 且可 `import`
 
 ## 3. MCP 客户端与连接池
 
-- [ ] 3.1 移植草稿的 stdio JSON-RPC 客户端并补齐：子进程 `exit` 处理、请求级取消、`cwd` 参数、启动重试；验证：单测用假 stdio 服务器覆盖 initialize/listTools 分页/callTool 错误/子进程退出
-- [ ] 3.2 按工作区连接池：懒启动、single-flight、串行启动、空闲回收、上限淘汰；验证：单测断言"同工作区复用/不同工作区隔离/空闲关闭/超限淘汰"
-- [ ] 3.3 降级路径：可执行文件缺失、握手失败、工具列表失败 → 零注册 + 一条日志；验证：单测断言不抛错且注册数为 0
+- [x] 3.1 移植草稿的 stdio JSON-RPC 客户端并补齐：子进程 `exit` 处理、请求级取消、`cwd` 参数、启动重试；验证：单测用假 stdio 服务器覆盖 initialize/listTools 分页/callTool 错误/子进程退出
+- [x] 3.2 按工作区连接池：懒启动、single-flight、串行启动、空闲回收、上限淘汰；验证：单测断言"同工作区复用/不同工作区隔离/空闲关闭/超限淘汰"
+- [x] 3.3 降级路径：可执行文件缺失、握手失败、工具列表失败 → 零注册 + 一条日志；验证：单测断言不抛错且注册数为 0
 
 ## 4. 工具面与子 agent 遮蔽
 
-- [ ] 4.1 注册 `mcp__engram__*`，名称/描述/参数 schema 与 engram 声明一致，结果按 dsh 形状返回；验证：实测 `dsh` 中模型可见工具数与 engram `tools/list` 一致
-- [ ] 4.2 子 agent 遮蔽（按 1.2 结论实现）+ 旁路兜底；验证：创建子代理后其工具面不含 `mcp__engram__*`（或经 `mcp_call` 调用被拒）
+- [x] 4.1 注册 `mcp__engram__*`，名称/描述/参数 schema 与 engram 声明一致，结果按 dsh 形状返回；验证：实测 `dsh` 中模型可见工具数与 engram `tools/list` 一致
+- [x] 4.2 子 agent 遮蔽（按 1.2 结论实现）+ 旁路兜底；验证：创建子代理后其工具面不含 `mcp__engram__*`（或经 `mcp_call` 调用被拒）
 - [ ] 4.4 旁路探针：验证 `mcp_call({tool:'mcp__engram__mem_save'})` 在子 agent 中是否绕过 `restrict`；"不能绕过"则删除 per-agent `guard`（去掉无失效模式的防御），"能绕过"则保留并让 spec 的旁路场景有实现支撑；验证：探针日志 + design Decisions 8 更新
-- [ ] 4.3 卸载回收：`ctx.effect` 关闭全部子进程并注销工具；验证：停用后无 engram 子进程残留（`pgrep -f 'engram mcp'` 为空）
+- [x] 4.3 卸载回收：`ctx.effect` 关闭全部子进程并注销工具；验证：停用后无 engram 子进程残留（`pgrep -f 'engram mcp'` 为空）
 
 ## 5. 会话绑定
 
-- [ ] 5.1 `agent/session-start` → `mem_session_start({id: dsh会话id, directory: 工作区})`，并建立"工具调用前必须已完成绑定"的屏障；验证：新会话后 `sqlite3 ~/.engram/engram.db "select id,directory from sessions order by started_at desc limit 1"` 正确，且首次 `mem_save` 不报 `unknown_session`
-- [ ] 5.2 任意 `source` 幂等复用，不新建会话；验证：resume 同一会话后 `sessions` 表行数不增
-- [ ] 5.3 向声明 `session_id` 的工具注入当前会话标识，显式传值优先；验证：两个会话各存一条，`session_id` 不同且互不串档
+- [x] 5.1 `agent/session-start` → `mem_session_start({id: dsh会话id, directory: 工作区})`，并建立"工具调用前必须已完成绑定"的屏障；验证：新会话后 `sqlite3 ~/.engram/engram.db "select id,directory from sessions order by started_at desc limit 1"` 正确，且首次 `mem_save` 不报 `unknown_session`
+- [x] 5.2 任意 `source` 幂等复用，不新建会话；验证：resume 同一会话后 `sessions` 表行数不增
+- [x] 5.3 向声明 `session_id` 的工具注入当前会话标识，显式传值优先；验证：两个会话各存一条，`session_id` 不同且互不串档
 
 ## 6. 项目解析与注入
 
-- [ ] 6.1 在会话绑定时用**该会话的工作区**驱动 engram 解析一次，并把 `project`/`project_source` 缓存在**该会话**上（同工作区结果相同，但归属按会话）；验证：在含 `.engram/config.json` 的工作区注入值与 engram 返回一致；且设置 `ENGRAM_PROJECT` 时目录解析仍胜出（实测 `project_source: git_root`）
-- [ ] 6.2 注入优先级 + `mem_save_prompt` 例外 + 歧义恢复不破坏；验证：单测覆盖 5 级优先级与例外分支，实测歧义恢复重试不被改写
-- [ ] 6.3 `injectSessionProject` / `injectSessionId` 开关；验证：关闭后请求不含对应参数
+- [x] 6.1 在会话绑定时用**该会话的工作区**驱动 engram 解析一次，并把 `project`/`project_source` 缓存在**该会话**上（同工作区结果相同，但归属按会话）；验证：在含 `.engram/config.json` 的工作区注入值与 engram 返回一致；且设置 `ENGRAM_PROJECT` 时目录解析仍胜出（实测 `project_source: git_root`）
+- [x] 6.2 注入优先级 + `mem_save_prompt` 例外 + 歧义恢复不破坏；验证：单测覆盖 5 级优先级与例外分支，实测歧义恢复重试不被改写
+- [x] 6.3 `injectSessionProject` / `injectSessionId` 开关；验证：关闭后请求不含对应参数
 
 ## 7. 被动捕获
 
-- [ ] 7.1 `agent/turn-stopping` 提交该回合最终回复文本，每回合一次，跳过被中断回合；验证：单测覆盖"多步一回合只提交一次""中断不提交"
-- [ ] 7.2 `extracted=0` 且存在学习段落时记日志；验证：用短条目触发后日志出现该记录
-- [ ] 7.3 `capturePassive: false` 时不调用；验证：单测 + 实测记忆不新增
+- [x] 7.1 `agent/turn-stopping` 提交该回合最终回复文本，每回合一次，跳过被中断回合；验证：单测覆盖"多步一回合只提交一次""中断不提交"
+- [x] 7.2 `extracted=0` 且存在学习段落时记日志；验证：用短条目触发后日志出现该记录
+- [x] 7.3 `capturePassive: false` 时不调用；验证：单测 + 实测记忆不新增
 
 ## 8. 压缩恢复
 
 - [ ] 8.1 探针：扩展现有 `scripts/probe` 验证 `agent.inject()` 在 `compaction/end` 之后同一回合内进入后续模型请求；验证：探针日志出现注入消息，且其后的 `request/header` 对应的消息序列包含它
-- [ ] 8.2 摘要持久化：`session/event` → `compaction/summary` → `mem_session_summary`（归属当前会话），按 `compactionId` 幂等；验证：单测 + 实测压缩后 engram 该会话 summary 等于摘要内容
-- [ ] 8.3 压缩后注入：`compaction/end` 成功后取 `mem_context`，按 `recoveryTokenBudget` 截断后注入；验证：实测压缩后请求含上下文，超预算时被截断
-- [ ] 8.4 开关与降级：`compactionRecovery=false` 不处理；失败只记日志；验证：单测覆盖两分支
+- [x] 8.2 摘要持久化：`session/event` → `compaction/summary` → `mem_session_summary`（归属当前会话），按 `compactionId` 幂等；验证：单测 + 实测压缩后 engram 该会话 summary 等于摘要内容
+- [x] 8.3 压缩后注入：`compaction/end` 成功后取 `mem_context`，按 `recoveryTokenBudget` 截断后注入；验证：实测压缩后请求含上下文，超预算时被截断
+- [x] 8.4 开关与降级：`compactionRecovery=false` 不处理；失败只记日志；验证：单测覆盖两分支
 - [ ] 8.5 校准 `recoveryTokenBudget`：用真实压缩摘要长度实测并给出取值理由；验证：design Risks 中该条目替换为实测值
 
 ## 9. 交付与迁移
@@ -59,7 +59,7 @@
 
 ## 10. 文档与约定
 
-- [ ] 10.1 README（Model Experience + 安装 + 配置表）与 `docs/engram-upgrade-checklist.md`；验证：按 README 在干净 profile 上装通
+- [x] 10.1 README（Model Experience + 安装 + 配置表）与 `docs/engram-upgrade-checklist.md`；验证：按 README 在干净 profile 上装通
 - [ ] 10.2 清理 `~/.dsh/AGENTS.md` 中与插件行为重叠/已漂移的段落（指向插件，含 cwd 路径 vs directory 路径的说明）；验证：重叠描述只剩一处来源
-- [ ] 10.3 修复 README 的 openspec 指针（仍指向已删除的 `engram-dsh-bridge-p0`）；验证：README 中的 `openspec validate` 命令可直接跑通
-- [ ] 10.4 给 `docs/event-findings.md` 补版本戳（dsh 包版本 + engram 版本 + node 版本 + 探测日期 + 安装目录无 `.git` 的说明）；验证：报告首节含四项版本事实
+- [x] 10.3 修复 README 的 openspec 指针（仍指向已删除的 `engram-dsh-bridge-p0`）；验证：README 中的 `openspec validate` 命令可直接跑通
+- [x] 10.4 给 `docs/event-findings.md` 补版本戳（dsh 包版本 + engram 版本 + node 版本 + 探测日期 + 安装目录无 `.git` 的说明）；验证：报告首节含四项版本事实

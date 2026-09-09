@@ -52,7 +52,7 @@
 ## Risks / Trade-offs
 
 - [多进程同 DB 的启动竞态] → 串行启动 + 重试；写并发实测 48/48 成功，风险集中在启动。
-- [池上限 8 与空闲 10 分钟为先验值] → engram 进程 RSS 本会话测不到（`ps` 被沙箱拒），安装后实测校准。
+- [池上限 8 与空闲 10 分钟] → 已用 `vmmap`/`footprint` 实测（`ps`/`top` 在本会话被沙箱拒）：engram MCP 子进程 physical footprint 约 **11.5–15.4 MB**（含 dsh 宿主自身那一个），故上限 8 的最坏占用约 **120 MB**，默认保留；空闲 10 分钟与 engram 的会话只存于 DB、连接可随时重建一致。
 - [engram 文档与已装版本行为不一致（`session_already_ended`）] → spec 只写实测行为；交付 `docs/engram-upgrade-checklist.md`，升级前回归。
 - [被动捕获对短条目静默丢弃] → 不重实现提取；`extracted=0` 且存在学习段落时记日志。
 - [子 agent 遮蔽已由探针证实（`agent/created` 窗口 + `restrict` 生效），但 `restrict` 需要**精确的工具名**且不覆盖 `mcp_call` 之类旁路] → 使用插件自己注册的名字列表，并叠加 per-agent `guard` 兜底旁路。

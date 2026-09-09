@@ -7,7 +7,7 @@
 ## 2. 仓库骨架
 
 - [x] 2.1 `package.json`（含 `dsh.bundle.patch`）+ `cordis.patch.yml`（`id: engram-bridge`）+ `tsconfig.json` 就位；验证：`pnpm install && pnpm typecheck` 通过
-- [ ] 2.3 校准池默认值：在普通 shell 用 `ps -o rss= -p $(pgrep -f "engram mcp")` 实测每进程 RSS（本会话沙箱禁用 `ps`），据此定 `poolMaxConnections`/`poolMaxIdleMs`；完成标准：≥3 进程实测数据 + 写入 design 的取值理由；验证：design Risks 中"先验值"条目被实测值替换
+- [x] 2.3 校准池默认值：在普通 shell 用 `ps -o rss= -p $(pgrep -f "engram mcp")` 实测每进程 RSS（本会话沙箱禁用 `ps`），据此定 `poolMaxConnections`/`poolMaxIdleMs`；完成标准：≥3 进程实测数据 + 写入 design 的取值理由；结果：`ps`/`top` 被沙箱拒，改用 `vmmap`/`footprint` 实测 11.5–15.4 MB/进程 ⇒ 上限 8 最坏约 120 MB，默认保留（写入 design Risks）
 - [x] 2.2 `src/index.ts` 导出 `name`/`inject`/`apply` 与 Schemastery `Config`（含 `command`/`args`/`env`/`toolCallTimeoutMs`/`poolMaxIdleMs`/`poolMaxConnections`/`projectOverrides`/`injectSessionProject`/`injectSessionId`/`capturePassive`）；验证：`pnpm build` 产出 `dist/index.js` 且可 `import`
 
 ## 3. MCP 客户端与连接池

@@ -47,7 +47,7 @@
 10. **配置用 Schemastery**（`interface Config` + 同名 `Schema`，默认值进 schema）；**零运行时依赖**，MCP 走 stdio 自实现最小 JSON-RPC 客户端（沿用草稿已验证骨架，补子进程 `exit` 处理、请求级取消、`cwd`、启动重试）。
 11. **不新增 dsh 会话事件类型；P0 不新增 system prompt 段。** 协议指引在 P0 仍由 `~/.dsh/AGENTS.md` 承担，但须删除与插件行为重叠/漂移的段落；P1 改用 `agent.inject()`（会话开始注入一条 user 消息，不破坏前缀缓存）。
 12. **子进程环境**：默认最小继承（`PATH`/`HOME` + 显式 `env` + engram 相关白名单），对齐官方 MCP client 的 `scrubbedParentEnv` 思路，避免把宿主环境全量泄漏给 engram。
-13. **压缩恢复挂 `session/event`，不是 agent 事件。** 实测压缩不重启会话（`source: 'compact'` 无生产者），两次完整 `compaction/start → summary → end` 落在同一回合的 step 之间，agent 面只有一条初始 `startup`。因此：摘要持久化监听 `compaction/summary`（其 `summary` 字段就是摘要内容，直接交 `mem_session_summary`，插件不自己生成摘要）；记忆注入在 `compaction/end` 成功之后（锁已释放）；按 `compactionId` 幂等；`compaction/summary` 之后紧跟的 `user/message` 是 dsh 的表面替换，插件不改写。锚点：`dsh-compaction/lib/types/types.d.ts:21-98`。
+13. **压缩恢复挂 `session/event`，不是 agent 事件。** 实测压缩不重启会话（`source: 'compact'` 无生产者），两次完整 `compaction/start → summary → end` 落在同一回合的 step 之间，agent 面只有一条初始 `startup`。因此：摘要持久化监听 `compaction/summary`（其 `summary` 字段就是摘要内容，直接交 `mem_session_summary`，插件不自己生成摘要）；记忆注入在 `compaction/end` 成功之后（锁已释放）；按 `compactionId` 幂等；`compaction/summary` 之后紧跟的 `user/message` 是 dsh 的表面替换，插件不改写。锚点：`dsh-compaction/lib/types/types.d.ts:21-98`。**已实测**（`scripts/probe/out/inject.jsonl`）：在 `compaction/end` 调用 `agent.inject()` 的消息，会出现在**下一个 step** 的模型可见消息序列里（marker 于 `step/start turn=1 step=3` 之后、下一条 `assistant/message` 之前）；注意注入是**延迟到下一个 step 边界**的，紧跟其后的嵌套压缩周期会把它推迟。
 
 ## Risks / Trade-offs
 

@@ -50,6 +50,7 @@ export function apply(ctx, config) {
   const aborted = new Set()
   const charCount = new Map()
   const steered = new Set()
+  const injected = new Set()
 
   const headerOf = (agent) => agent?.session?.header ?? {}
   const sidOf = (agent) => String(agent?.session?.id ?? 'unknown')
@@ -237,6 +238,37 @@ export function apply(ctx, config) {
       return
     }
 
+    // Scenario 'inject': prove that agent.inject() issued at compaction/end is
+    // delivered to the model-visible surface before the next step.
+    if (
+      scenarios.has('inject') &&
+      event.type === 'compaction/end' &&
+      agent !== undefined &&
+      origin === null &&
+      !injected.has(sid)
+    ) {
+      injected.add(sid)
+      void (async () => {
+        try {
+          const llm = await import(config.llmModule)
+          agent.inject(
+            llm.createUserMessage({
+              content: [{ type: 'text', text: 'PROBE-INJECT-MARKER: compaction recall context.' }],
+              source: { kind: 'plugin', plugin: 'probe-events' },
+            }),
+          )
+          write({ ev: 'probe', type: 'probe/inject', sid, at: 'compaction/end' })
+        } catch (error) {
+          write({
+            ev: 'probe',
+            type: 'probe/inject-failed',
+            sid,
+            error: String(error && error.message ? error.message : error),
+          })
+        }
+      })()
+    }
+
     if (!KEEP.has(event.type)) return
 
     const record = { ev: 'session', type: event.type, sid, origin }
@@ -283,6 +315,13 @@ export function apply(ctx, config) {
         break
       case 'user/message':
         record.source = data.source?.kind ?? null
+        record.text = Array.isArray(data.content)
+          ? data.content
+              .filter((b) => b.type === 'text')
+              .map((b) => b.text)
+              .join('')
+              .slice(0, 120)
+          : null
         break
       case 'compaction/start':
       case 'compaction/summary':

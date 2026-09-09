@@ -43,7 +43,7 @@
 
 ## 8. 压缩恢复
 
-- [ ] 8.1 探针：扩展现有 `scripts/probe` 验证 `agent.inject()` 在 `compaction/end` 之后同一回合内进入后续模型请求；验证：探针日志出现注入消息，且其后的 `request/header` 对应的消息序列包含它
+- [x] 8.1 探针：扩展现有 `scripts/probe` 验证 `agent.inject()` 在 `compaction/end` 之后同一回合内进入后续模型请求；结果：`agent.inject()` 于 `compaction/end` 注入的 marker 出现在下一个 step 的模型可见序列（`scripts/probe/out/inject.jsonl`，t=35198.5 在 step/start 35197.9 之后）
 - [x] 8.2 摘要持久化：`session/event` → `compaction/summary` → `mem_session_summary`（归属当前会话），按 `compactionId` 幂等；验证：单测 + 实测压缩后 engram 该会话 summary 等于摘要内容
 - [x] 8.3 压缩后注入：`compaction/end` 成功后取 `mem_context`，按 `recoveryTokenBudget` 截断后注入；验证：实测压缩后请求含上下文，超预算时被截断
 - [x] 8.4 开关与降级：`compactionRecovery=false` 不处理；失败只记日志；验证：单测覆盖两分支

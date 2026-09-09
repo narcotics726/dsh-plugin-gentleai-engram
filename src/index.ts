@@ -1,3 +1,4 @@
+import { homedir } from 'node:os';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
 import { SessionBindings, type Binding } from './bindings.js';
@@ -9,6 +10,7 @@ import { errorMessage, loggerFrom, type Logger } from './log.js';
 import { McpClient, type McpCallResult, type McpToolDeclaration } from './mcp-client.js';
 import { ConnectionPool } from './pool.js';
 import { isSubagentSession, shadowEngramTools, TOOL_PREFIX } from './subagent.js';
+import { readToolCache, sameToolSurface, toolCacheFingerprint, toolCachePath, writeToolCache } from './tool-cache.js';
 import { buildToolDefinitions, siteOf, type ToolCallSite } from './tools.js';
 
 export { Config };
@@ -93,14 +95,25 @@ export function apply(ctx: PluginContext, config: EngramConfig): void {
   });
   ctx.effect(() => () => pool.dispose(), 'engram-bridge.pool');
 
-  const registerTools = (declarations: readonly McpToolDeclaration[]): void => {
-    if (toolsRegistered) return;
-    toolsRegistered = true;
-    for (const definition of buildToolDefinitions(declarations, { timeoutMs: config.toolCallTimeoutMs, run })) {
-      registeredNames.add(definition.name);
-      ctx.tools.register(definition);
+  let disposers: Array<() => void> = [];
+  let registeredSurface: readonly McpToolDeclaration[] = [];
+  const registerTools = (declarations: readonly McpToolDeclaration[], origin: string): void => {
+    if (declarations.length === 0) return;
+    if (toolsRegistered) {
+      if (!sameToolSurface(registeredSurface, declarations)) {
+        log.warn(
+          `engram tool surface changed after registration (${registeredSurface.length} -> ${declarations.length}); keeping the first set`,
+        );
+      }
+      return;
     }
-    log.info(`registered ${registeredNames.size} engram tools`);
+    toolsRegistered = true;
+    registeredSurface = declarations;
+    disposers = buildToolDefinitions(declarations, { timeoutMs: config.toolCallTimeoutMs, run }).map((definition) => {
+      registeredNames.add(definition.name);
+      return ctx.tools.register(definition);
+    });
+    log.info(`registered ${registeredNames.size} engram tools (${origin})`);
   };
 
   const callOnWorkspace = async (
@@ -111,7 +124,7 @@ export function apply(ctx: PluginContext, config: EngramConfig): void {
   ): Promise<McpCallResult> => {
     try {
       const entry = await pool.acquire(workspace);
-      registerTools(entry.tools);
+      registerTools(entry.tools, `workspace ${workspace}`);
       return await entry.client.callTool(toolName, args, signal);
     } catch (error) {
       if (!degradedLogged) {
@@ -212,7 +225,7 @@ export function apply(ctx: PluginContext, config: EngramConfig): void {
       .ensure(sessionId, workspace)
       .then(() => {
         const entry = pool.peek(workspace);
-        if (entry !== undefined) registerTools(entry.tools);
+        if (entry !== undefined) registerTools(entry.tools, `workspace ${workspace}`);
       })
       .catch((error: unknown) => {
         if (!degradedLogged) {
@@ -263,9 +276,61 @@ export function apply(ctx: PluginContext, config: EngramConfig): void {
     () => () => {
       bindings.dispose();
       agents.clear();
+      for (const dispose of disposers) dispose();
+      disposers = [];
+      toolsRegistered = false;
+      registeredNames.clear();
     },
     'engram-bridge.state',
   );
+
+  // Capability discovery at load: engram's tool list does not depend on the
+  // workspace, and a per-workspace connection cannot be established before a
+  // session's FIRST model request (acceptance probe: session-start 67.8ms,
+  // first request 137.4ms; a spawn+handshake costs ~100-300ms). One
+  // short-lived child with a neutral cwd registers the tool surface early; it
+  // binds no session and calls no tool. Workspace connections stay lazy, and a
+  // later successful connection self-heals a failed discovery.
+  // Synchronous cache warm-up: a previous successful discovery lets the very
+  // first request of a cold run already carry the tool surface (see tool-cache).
+  const fingerprint = toolCacheFingerprint(config.command, config.args);
+  const cachePath = toolCachePath();
+  const cached = readToolCache(cachePath, fingerprint);
+  if (cached !== undefined) registerTools(cached, 'cache');
+
+  let discoverySettled = false;
+  const discovery = (async (): Promise<void> => {
+    let client: McpClient | undefined;
+    try {
+      client = await McpClient.connect({
+        command: config.command,
+        args: config.args,
+        env: config.env,
+        cwd: homedir(),
+        requestTimeoutMs: config.toolCallTimeoutMs,
+        clientName: name,
+        logger: log,
+      });
+      registerTools(client.tools, 'discovery');
+      writeToolCache(cachePath, fingerprint, client.tools);
+    } catch (error) {
+      if (!degradedLogged) {
+        degradedLogged = true;
+        log.error(`engram unavailable at load: ${errorMessage(error)}`);
+      }
+    } finally {
+      client?.close();
+      discoverySettled = true;
+    }
+  })();
+
+  // No hook can influence a step's tool list: it is frozen when that step's
+  // system prompt is assembled, before any listener runs (dsh-agent-loop:
+  // preStep assembles at :502, the pre-step waterfall at :506, and
+  // `buildRequest(..., assembly.tools, ...)` at :619). Gating `agent/request`
+  // or `agent/pre-step` on discovery was measured to have no effect on the
+  // first request's tool list. What makes the first request deterministic is
+  // the synchronous cache warm-up above; discovery then refreshes it.
 
   // Fail loud on unusable configuration, never at call time.
   if (config.command.trim() === '') throw new Error('engram-bridge: config.command is required');

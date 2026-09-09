@@ -175,6 +175,21 @@ export function apply(ctx, config) {
     }
   })
 
+  ctx.on('agent/pre-step', async (payload, next) => {
+    const names = toolNames(payload.agent)
+    write({
+      ev: 'agent',
+      type: 'agent/pre-step',
+      sid: sidOf(payload.agent),
+      turn: payload.turn,
+      step: payload.step,
+      catalog: names.length,
+      engram: names.filter((n) => n.startsWith('mcp__engram__')).length,
+      hasNext: typeof next === 'function',
+    })
+    return await next()
+  })
+
   ctx.on('agent/status', ({ agent, status }) => {
     write({ ev: 'agent', type: 'agent/status', sid: sidOf(agent), status })
   })
@@ -277,10 +292,18 @@ export function apply(ctx, config) {
       case 'turn/start':
         record.turn = data.turn
         break
-      case 'turn/end':
+      case 'turn/end': {
         record.turn = data.turn
         record.reason = data.reason ?? null
+        // Late catalog check: proves whether tools registered asynchronously
+        // (e.g. after a load-time capability discovery) ever reach this agent.
+        if (agent !== undefined) {
+          const names = toolNames(agent)
+          record.catalogAfter = names.length
+          record.engramAfter = names.filter((n) => n.startsWith('mcp__engram__')).length
+        }
         break
+      }
       case 'step/start':
       case 'step/end':
         record.turn = data.turn

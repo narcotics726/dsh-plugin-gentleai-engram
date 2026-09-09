@@ -30,6 +30,8 @@
 | 子 agent 遮蔽 | 子 agent 会话中 engram 工具从模型可见工具面消失，经 `mcp_call` 之类旁路调用也会被拒 |
 | 失败降级 | engram 缺失 / 握手失败 / 超时 → 零注册 + 一条日志，不阻断模型轮次 |
 
+> 工具面在首次成功发现后缓存到 `$DSH_HOME/storages/engram-bridge/tools.json`（含 `command`/`args` 指纹），使之后每次启动的**首个**模型请求就已带上全部 engram 工具；冷启动（无缓存）的首个请求可能晚一步可见。
+
 ## Model Experience
 
 本插件对模型输入的影响（dsh 插件 README 规范要求）：

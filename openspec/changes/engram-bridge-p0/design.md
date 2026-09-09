@@ -36,7 +36,7 @@
 ## Decisions
 
 1. **按工作区池化 engram 子进程，cwd = 会话工作区。** 因为 `mem_capture_passive` / `mem_session_end` 的**项目**只认进程 cwd、且没有可注入的 project 参数（归属另由传入的 `session_id` 决定；实测 + DOCS L826），单进程多工作区必然把记忆写进错误的项目。替代方案：单进程 + 全程显式注入（对这两个工具无效）；每会话一进程（进程数随会话增长，收益相同）。
-2. **懒启动 + 并发去重 + 串行启动与重试。** 工作区集合在启动时未知（`SessionHeader.cwd` 由会话创建时决定）；实测观察到启动期瞬时数据库锁失败，故启动需串行化并允许重试。空闲回收与连接上限见配置。
+2. **懒启动 + 并发去重 + 串行启动与重试。** 工作区集合在启动时未知（`SessionHeader.cwd` 由会话创建时决定）；实测观察到启动期瞬时数据库锁失败，故启动需串行化并允许重试。空闲回收与连接上限见配置。**工具面另有缓存**：一个 step 的工具清单在该 step 的系统提示组装时即被冻结（dsh-agent-loop:502 组装 → :506 pre-step waterfall → :619 `buildRequest(..., assembly.tools, ...)`），早于任何插件钩子——实测在 `agent/request` 与 `agent/pre-step` 上等待发现完成都改不了该 step 的工具面。因此插件把成功发现的工具面缓存到 `$DSH_HOME/storages/engram-bridge/tools.json`，下次加载同步注册：冷启动的首个请求可能不含 engram 工具，之后每次启动的首个请求都包含（实测冷 26→0、热 48→22）。
 3. **项目名由 engram 解析一次，插件缓存并全程显式注入。** git 仓库的项目名可能是 engram 存储的 binding label（DOCS L792-793），插件无法从文件系统复制；且显式 project 是 validated selection，猜错会硬失败（实测 `unknown_project`）。替代方案（插件自判：读 `.engram/config.json` + git + basename）在 git_remote / monorepo / binding 三种情形会错。
 4. **注入优先级**：显式参数 > `projectOverrides[工作区]` > 会话解析结果 > `ENGRAM_PROJECT` > 不注入。绝不使用目录名兜底（实测该兜底会产出 engram 不认账的名字）。与 `~/.dsh/AGENTS.md` 不矛盾：AGENTS.md 写的是 engram 的 **cwd 路径**（实测 `ENGRAM_PROJECT` 在该路径胜出，`project_source: process_override`），本插件走的是 **directory 路径**（实测 directory 胜出，`git_root`）。AGENTS.md 需按 tasks 10.2 改写为指向本 spec：旧文描述的是 cwd 路径（`ENGRAM_PROJECT` > 目录检测），本 spec 管的是 directory 路径（directory > `ENGRAM_PROJECT`），且**删除 basename 兜底**（插件永不注入未经 engram 认账的项目名）。
 5. **写类工具靠 `session_id`，不靠 cwd。** 显式 session_id 是 engram 官方指定的并发解法（DOCS L839：不带 session_id 时多候选 fail closed），且 `mem_save` 的项目优先取 session 的项目。`mem_save_prompt` 的 `project` 只用于歧义恢复，不注入；其 `session_id` 照常注入。**被动捕获的归属同样靠注入的 `session_id`**：实测同工作区两个会话各带自己的 `session_id` 提交捕获，两条 observation 分别落在各自会话下（项目均取自 cwd）——归属与项目由两条不同机制负责：归属 = 注入的 `session_id`，项目 = 按工作区池化的 cwd。
@@ -56,6 +56,7 @@
 - [engram 文档与已装版本行为不一致（`session_already_ended`）] → spec 只写实测行为；交付 `docs/engram-upgrade-checklist.md`，升级前回归。
 - [被动捕获对短条目静默丢弃] → 不重实现提取；`extracted=0` 且存在学习段落时记日志。
 - [子 agent 遮蔽依赖 `restrict` 的**精确工具名**] → 使用插件自己注册的名字列表（未注册时不安装 restriction）；旁路由同一条 restriction 覆盖，前提是折叠工具用调用者身份解析目标（本部署的 `dsh-mcp-adapter` 已核实如此）。
+- [冷启动（无缓存）的首个请求可能不含 engram 工具] → 只影响首次运行或一次性 headless；发现完成后即对后续请求可见并写入缓存，交互式会话几乎不会命中。
 - [`link:` 安装让 profile 依赖本地路径] → 个人项目可接受；发布时改为正式包。
 - [不新增 system prompt 段 → 模型仍依赖 AGENTS.md 的自觉] → P0 清理重叠段落，P1 用 `agent.inject()` 补上。
 - [启动任意 dsh profile 会重写 `$DSH_HOME/profiles/<name>/cordis.yml`] → 探针与验证必须重定向 `DSH_HOME`（探针即如此）；安装步骤本身写 `~/.dsh`，属预期行为。

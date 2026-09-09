@@ -49,11 +49,11 @@ related:
 - **THEN** 各自存在一个 engram 子进程，其工作目录分别等于各自的工作区
 
 ### Requirement: 懒启动与并发去重
-连接 SHALL 在会话首次需要时建立，SHALL NOT 在插件加载时为尚未出现的工作区预建；同一工作区的并发首次使用 SHALL 只启动一次。
+工作区连接 SHALL 在会话首次需要时建立，SHALL NOT 在插件加载时为尚未出现的工作区预建；同一工作区的并发首次使用 SHALL 只启动一次。
 
-#### Scenario: 无会话时不启动
+#### Scenario: 无会话时不建立工作区连接
 - **WHEN** dsh 已启动但还没有任何会话
-- **THEN** 不存在任何 engram 子进程
+- **THEN** 不存在任何工作区连接（加载期的一次性工具面发现连接已在注册后关闭）
 
 #### Scenario: 并发首次使用同一工作区
 - **WHEN** 两个会话同时进入同一个此前未使用的工作区
@@ -87,6 +87,21 @@ related:
 #### Scenario: 结果透传
 - **WHEN** 一次工具调用返回结构化内容
 - **THEN** dsh 侧得到可渲染的工具结果，内容不被改写
+
+### Requirement: 工具面缓存与首个请求可见
+插件 SHALL 把成功发现的工具面缓存到 `$DSH_HOME/storages/engram-bridge/tools.json`（记录 `command`/`args` 指纹），并在后续加载时**同步**注册缓存中的工具面。
+
+#### Scenario: 缓存命中
+- **WHEN** 上一次运行成功发现过工具面，本次启动后发出会话的第一个模型请求
+- **THEN** 该请求的工具面已包含全部 engram 工具
+
+#### Scenario: 冷启动且无缓存
+- **WHEN** 从未成功发现过工具面，且第一个请求早于发现完成
+- **THEN** 该请求不含 engram 工具；发现完成后工具面对后续请求可见，并写入缓存
+
+#### Scenario: 指纹不匹配
+- **WHEN** 缓存记录的 `command`/`args` 与当前配置不同
+- **THEN** 不使用该缓存，改用本次发现的结果
 
 ### Requirement: 调用超时与取消
 单次工具调用超过 `toolCallTimeoutMs` SHALL 失败；调用被取消时插件 SHALL 结束该调用，且 SHALL NOT 使会话失败。

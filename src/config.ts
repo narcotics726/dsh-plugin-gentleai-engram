@@ -12,8 +12,10 @@ export interface Config {
   toolCallTimeoutMs: number;
   /** Maximum number of live engram child processes (one per workspace). */
   poolMaxConnections: number;
-  /** Close a workspace connection after this much idle time. */
+  /** Close a workspace connection after this much idle time; 0 disables idle reclaim. */
   poolMaxIdleMs: number;
+  /** How often the plugin sweeps idle connections itself (>= 1000). */
+  poolSweepIntervalMs: number;
   /** Workspace absolute path -> engram project name. Highest injection precedence. */
   projectOverrides: Record<string, string>;
   /** Inject project/directory arguments. */
@@ -35,6 +37,7 @@ export const Config: z<Config> = z.object({
   toolCallTimeoutMs: z.number().default(60000),
   poolMaxConnections: z.number().default(8),
   poolMaxIdleMs: z.number().default(600000),
+  poolSweepIntervalMs: z.number().min(1000).default(60000),
   projectOverrides: z.dict(String).default({}),
   injectSessionProject: z.boolean().default(true),
   injectSessionId: z.boolean().default(true),

@@ -95,6 +95,24 @@ export function apply(ctx: PluginContext, config: EngramConfig): void {
   });
   ctx.effect(() => () => pool.dispose(), 'engram-bridge.pool');
 
+  // Idle reclaim is plugin-driven: nothing else calls sweep(), so before this timer existed a
+  // quiet process kept every child alive (spec: 空闲回收由插件自主驱动).
+  ctx.effect(
+    () => {
+      if (config.poolMaxIdleMs <= 0) return; // 0 disables idle reclaim entirely
+      // A directly-constructed config (tests, embedders) can omit the key; never hand
+      // `undefined` to setInterval, which degrades into a ~1ms busy poll.
+      const intervalMs = Math.max(1000, config.poolSweepIntervalMs ?? 60000);
+      const timer = setInterval(() => {
+        const closed = pool.sweep();
+        if (closed.length > 0) log.debug(`closed ${closed.length} idle engram connection(s)`);
+      }, intervalMs);
+      timer.unref?.();
+      return () => clearInterval(timer);
+    },
+    'engram-bridge.pool-sweep',
+  );
+
   let disposers: Array<() => void> = [];
   let registeredSurface: readonly McpToolDeclaration[] = [];
   const registerTools = (declarations: readonly McpToolDeclaration[], origin: string): void => {
@@ -123,9 +141,10 @@ export function apply(ctx: PluginContext, config: EngramConfig): void {
     signal?: AbortSignal,
   ): Promise<McpCallResult> => {
     try {
-      const entry = await pool.acquire(workspace);
-      registerTools(entry.tools, `workspace ${workspace}`);
-      return await entry.client.callTool(toolName, args, signal);
+      return await pool.withConnection(workspace, async (entry) => {
+        registerTools(entry.tools, `workspace ${workspace}`);
+        return await entry.client.callTool(toolName, args, signal);
+      });
     } catch (error) {
       if (!degradedLogged) {
         degradedLogged = true;

@@ -5,7 +5,10 @@ export interface PoolEntry {
   readonly workspace: string;
   readonly client: McpClient;
   readonly tools: readonly McpToolDeclaration[];
+  /** Idle clock: refreshed on acquire and on every settlement. */
   lastUsed: number;
+  /** Calls not yet settled; a busy connection is never reclaimed as idle. */
+  inFlight: number;
 }
 
 export interface PoolOptions {
@@ -63,8 +66,25 @@ export class ConnectionPool {
     return this.#entries.get(workspace);
   }
 
+  /**
+   * Run one call on the workspace's connection.
+   *
+   * The connection is never handed out: the pool owns the in-flight count, so a connection
+   * cannot be "acquired but forgotten" and a settlement always restarts its idle clock.
+   */
+  async withConnection<T>(workspace: string, work: (entry: PoolEntry) => Promise<T>): Promise<T> {
+    const entry = await this.#acquire(workspace);
+    entry.inFlight += 1;
+    try {
+      return await work(entry);
+    } finally {
+      entry.inFlight -= 1;
+      entry.lastUsed = this.#now();
+    }
+  }
+
   /** Resolve a connection for the workspace, spawning at most one at a time. */
-  async acquire(workspace: string): Promise<PoolEntry> {
+  async #acquire(workspace: string): Promise<PoolEntry> {
     if (this.#disposed) throw new Error('engram-bridge: connection pool is disposed');
     const existing = this.#entries.get(workspace);
     if (existing !== undefined) {
@@ -82,12 +102,16 @@ export class ConnectionPool {
     }
   }
 
-  /** Close every entry idle for longer than `maxIdleMs`; returns the closed workspaces. */
+  /**
+   * Close every entry idle for longer than `maxIdleMs`; returns the closed workspaces.
+   * A connection with calls in flight is never reclaimed as idle.
+   */
   sweep(): string[] {
     if (this.#options.maxIdleMs <= 0) return [];
     const deadline = this.#now() - this.#options.maxIdleMs;
     const closed: string[] = [];
     for (const entry of [...this.#entries.values()]) {
+      if (entry.inFlight > 0) continue;
       if (entry.lastUsed <= deadline) {
         this.#close(entry.workspace, 'idle timeout');
         closed.push(entry.workspace);
@@ -121,7 +145,7 @@ export class ConnectionPool {
       if (this.#disposed) throw new Error('engram-bridge: connection pool is disposed');
       try {
         const client = await this.#connect(workspace);
-        const entry: PoolEntry = { workspace, client, tools: client.tools, lastUsed: this.#now() };
+        const entry: PoolEntry = { workspace, client, tools: client.tools, lastUsed: this.#now(), inFlight: 0 };
         this.#entries.set(workspace, entry);
         this.#evictOverLimit(workspace);
         return entry;
@@ -146,6 +170,13 @@ export class ConnectionPool {
         if (victim === undefined || entry.lastUsed < victim.lastUsed) victim = entry;
       }
       if (victim === undefined) return;
+      // The cap is a hard limit: a busy victim is closed anyway, and the failure of its
+      // in-flight call is the acknowledged price (engram-bridge-runtime, 上限淘汰场景).
+      if (victim.inFlight > 0) {
+        this.#log.warn(
+          `closing engram connection for ${victim.workspace} while ${victim.inFlight} call(s) are in flight (over connection limit)`,
+        );
+      }
       this.#close(victim.workspace, 'over connection limit');
     }
   }

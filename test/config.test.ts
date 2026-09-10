@@ -14,7 +14,13 @@ test('config defaults', () => {
   assert.equal(resolved.capturePassive, true);
   assert.equal(resolved.compactionRecovery, true);
   assert.equal(resolved.recoveryTokenBudget, 800);
+  assert.equal(resolved.recallWakeup, true);
   assert.deepEqual(resolved.projectOverrides, {});
+});
+
+test('recallWakeup is an opt-out that survives resolution', () => {
+  assert.equal(new Config({ command: '/bin/engram', recallWakeup: false }).recallWakeup, false);
+  assert.equal(new Config({ command: '/bin/engram' }).recallWakeup, true);
 });
 
 test('config rejects a missing command', () => {

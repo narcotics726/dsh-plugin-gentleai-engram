@@ -192,9 +192,10 @@ test('live wiring: session start, capture and compaction recovery', { skip: !liv
     await handlers.get('session/event')?.(session, events.find((event) => event.type === 'compaction/end'));
     await waitFor(() => sent.length === 1);
     assert.ok((sent[0]?.text ?? '').length > 0);
-    // A real turn-less compaction (turn: null) must land on the next-turn boundary:
-    // next-step is torn down as the manual transaction converges.
-    assert.equal(sent[0]?.target, 'next-turn');
+    // A real turn-less compaction (turn: null) must wake the driver so the recall becomes a
+    // turn of its own; the delivery boundary stays uniform across both compaction owners.
+    assert.equal(sent[0]?.target, 'next-step');
+    assert.equal(sent[0]?.wakeup, true, 'a turn-less compaction must wake the driver');
 
     db.close();
     assert.ok(!logs.some((line) => line.startsWith('error:')), `no degradation logs: ${logs.join(' | ')}`);

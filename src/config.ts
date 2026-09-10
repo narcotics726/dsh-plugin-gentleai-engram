@@ -28,6 +28,13 @@ export interface Config {
   compactionRecovery: boolean;
   /** Token budget for the post-compaction recall injection. */
   recoveryTokenBudget: number;
+  /**
+   * Whether a standalone (between-turns) compaction wakes the driver so the recall opens its own
+   * self-recovery turn. `false` is a cost opt-out: the recall still gets delivered, but it waits
+   * for the next user message - a known-degraded mode, since pending input can be discarded by
+   * cancellation or disposal.
+   */
+  recallWakeup: boolean;
 }
 
 export const Config: z<Config> = z.object({
@@ -44,4 +51,5 @@ export const Config: z<Config> = z.object({
   capturePassive: z.boolean().default(true),
   compactionRecovery: z.boolean().default(true),
   recoveryTokenBudget: z.number().default(800),
+  recallWakeup: z.boolean().default(true),
 });

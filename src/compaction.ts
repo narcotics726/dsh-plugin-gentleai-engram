@@ -3,13 +3,28 @@ import { parseEnvelope, truncateToTokenBudget } from './engram.js';
 import { errorMessage, type Logger } from './log.js';
 
 /**
- * Where a post-compaction recall is queued.
+ * Where a post-compaction recall is delivered.
  *
- * `next-step` is right for a compaction owned by a running turn; `next-turn` is the only safe
- * boundary for a standalone manual compaction, because the step queue is torn down as that
- * transaction converges and the queued recall is discarded unrun.
+ * The bridge uses `next-step` for both compaction owners: a running turn claims the step queue at
+ * its next boundary, and an idle driver is woken to open a turn of its own. This is a delivery
+ * preference, not a contract - the host reclassifies the boundary itself when the phase is
+ * already aborted, and parks waking input when the agent is disposed.
  */
 export type RecallTarget = 'next-turn' | 'next-step';
+
+/**
+ * Framing prepended to the recall so the injected message explains itself.
+ *
+ * The turn carrying it may or may not already carry user input - waking races the user's next
+ * message, and the host merges both into one turn when the user wins that race - so the
+ * instruction is conditional rather than assuming an empty turn.
+ */
+const RECALL_FRAME = [
+  '[engram post-compaction self-recovery] The context was just compacted, and the bridge injected',
+  'the memory recall below so you can re-orient. If this turn carries no other user input, reply',
+  'with one short sentence stating what you recovered and any obvious gap, and do not start new',
+  'work. If this turn carries user input, answer it and treat the recall as background.',
+].join(' ');
 
 export interface CompactionOptions {
   enabled: boolean;
@@ -18,8 +33,10 @@ export interface CompactionOptions {
   /** Project of the session, used for the recall query. */
   resolveProject(sessionId: string): string | undefined;
   call(sessionId: string, tool: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<McpCallResult>;
+  /** Whether a standalone compaction wakes the driver to open its own self-recovery turn. */
+  recallWakeup: boolean;
   /** Model-visible recall delivery seam (the host wires `agent.send`). */
-  deliver(sessionId: string, text: string, target: RecallTarget): void;
+  deliver(sessionId: string, text: string, target: RecallTarget, wakeup: boolean): void;
 }
 
 /**
@@ -80,12 +97,17 @@ export class CompactionRecovery {
       if (project !== undefined) args.project = project;
       const result = await this.#options.call(sessionId, 'mem_context', args, signal);
       const envelope = parseEnvelope(result.content);
-      const text = truncateToTokenBudget(envelope.result, this.#options.tokenBudget);
-      if (text.trim() === '') return;
-      // `turn === null` is the host's own marker for a standalone transaction between turns:
-      // its step inbox is discarded when the transaction converges (measured on a manual
-      // `/compact`, where the queued recall came back with `outcome: 'canceled'` at once).
-      this.#options.deliver(sessionId, text, turn === null ? 'next-turn' : 'next-step');
+      if (envelope.result.trim() === '') return;
+      // Reserve the framing's share of the budget: a recall that cannot explain what it is would
+      // be worse than a shorter one, so the framing is never the part that gets truncated away.
+      const recallBudget = Math.max(0, this.#options.tokenBudget - Math.ceil(RECALL_FRAME.length / 4));
+      const text = `${RECALL_FRAME}\n\n${truncateToTokenBudget(envelope.result, recallBudget)}`;
+      // `turn === null` is the host's marker for a standalone transaction between turns. Nothing
+      // is running that could claim the recall, so the driver has to be woken for it. A run-owned
+      // compaction is claimed by its own turn at the next step boundary instead - waking there
+      // would open a second, empty turn.
+      const wakeup = turn === null && this.#options.recallWakeup;
+      this.#options.deliver(sessionId, text, 'next-step', wakeup);
     } catch (error) {
       this.#options.log.warn(`post-compaction recall failed for session ${sessionId}: ${errorMessage(error)}`);
     }

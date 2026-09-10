@@ -170,6 +170,7 @@ function configFor(callsPath: string): Parameters<typeof apply>[1] {
     capturePassive: true,
     compactionRecovery: true,
     recoveryTokenBudget: 800,
+    recallWakeup: true,
   };
 }
 
@@ -251,15 +252,35 @@ test('stub wiring: capture and compaction recovery react to real host envelopes'
     await host.handlers.get('session/event')?.(session, events.find((event) => event.type === 'compaction/end'));
     await waitFor(() => sent.length === 1);
     assert.match(sent[0]?.text ?? '', /STUB RECALL/);
-    // The host payload carries turn: null — a standalone transaction between turns.
-    // Queueing at the step boundary there is what made the recall unobservable on a real /compact.
-    assert.equal(sent[0]?.target, 'next-turn');
-    assert.equal(sent[0]?.wakeup, false, 'the bridge must not wake an idle driver');
-    assert.deepEqual(injected, [], 'the discarded step-boundary seam must not be used');
+    // The host payload carries turn: null — a standalone transaction between turns. Nothing is
+    // running that could claim the recall, so the bridge wakes the driver and the recall opens a
+    // self-recovery turn of its own instead of waiting for the user's next message.
+    assert.equal(sent[0]?.target, 'next-step');
+    assert.equal(sent[0]?.wakeup, true, 'a turn-less compaction must wake the driver');
+    assert.match(sent[0]?.text ?? '', /post-compaction self-recovery/, 'the recall explains itself');
+    assert.deepEqual(injected, [], 'the wakeup-less seam must not be used');
 
     assert.equal(session.seq, seqBeforeRecovery, 'the compaction listeners must not append session events');
     assert.deepEqual(host.logs.warn, [], 'no shape warnings expected against the real envelope');
     assert.deepEqual(host.logs.error, []);
+
+    // A host without `send` must be reported, not silently downgraded to the wakeup-less seam:
+
+    // that fallback is exactly the parked-recall defect this path exists to fix.
+    const legacySession = store.create('stub-2', { meta: { cwd: repo } });
+    const legacyInjected: string[] = [];
+    const legacyAgent = {
+      session: legacySession,
+      inject(message: { content?: Array<{ text?: string }> }): void {
+        legacyInjected.push(message.content?.[0]?.text ?? '');
+      },
+    };
+    await host.handlers.get('agent/session-start')?.({ agent: legacyAgent });
+    legacySession.append('compaction/end', { compactionId: 'c2', turn: null });
+    const legacyEvents = legacySession.snapshotEvents();
+    await host.handlers.get('session/event')?.(legacySession, legacyEvents.find((event) => event.type === 'compaction/end'));
+    await waitFor(() => host.logs.warn.some((message) => /no live agent with send\(\)/.test(message)));
+    assert.deepEqual(legacyInjected, [], 'a send-less host must not receive a wakeup-less fallback');
 
     assert.ok(existsSync(join(dshHome, 'storages', 'engram-bridge', 'tools.json')), 'cache written to the temp home');
     if (realToolsBefore !== undefined) {

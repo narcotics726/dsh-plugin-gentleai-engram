@@ -181,6 +181,9 @@ export function apply(ctx: PluginContext, config: EngramConfig): void {
   const compaction = new CompactionRecovery({
     enabled: config.compactionRecovery,
     tokenBudget: config.recoveryTokenBudget,
+    // Directly-constructed configs (tests, embedders) can omit the key; fall back to the schema
+    // default rather than letting `undefined` decide whether the driver gets woken.
+    recallWakeup: config.recallWakeup ?? true,
     log,
     resolveProject: (sessionId) => bindings.peek(sessionId)?.project,
     call: (sessionId, tool, args, signal) => {
@@ -191,11 +194,11 @@ export function apply(ctx: PluginContext, config: EngramConfig): void {
       }
       return callOnWorkspace(workspace, tool, args, signal);
     },
-    deliver: (sessionId, text, target) => {
+    deliver: (sessionId, text, target, wakeup) => {
       const agent = agents.get(sessionId);
       if (typeof agent?.send !== 'function') {
-        // Falling back to `agent.inject()` would silently reproduce the discarded-recall bug
-        // this path exists to fix, so a host without `send` is reported instead.
+        // Falling back to `agent.inject()` (send with wakeup=false) would silently reproduce the
+        // parked-recall bug this path exists to fix, so a host without `send` is reported instead.
         log.warn(`no live agent with send() for session ${sessionId}; post-compaction recall was not delivered`);
         return;
       }
@@ -206,7 +209,7 @@ export function apply(ctx: PluginContext, config: EngramConfig): void {
             source: { kind: 'plugin', plugin: name },
           }),
           target,
-          false,
+          wakeup,
         );
       } catch (error) {
         log.warn(`post-compaction recall injection failed for session ${sessionId}: ${errorMessage(error)}`);

@@ -42,7 +42,7 @@
 
 ## 6. 真机验收（阻塞项）
 
-- [ ] 6.1 重建 + 重启 dsh，手动 `/compact` 一次，**不要发言**。
+- [x] 6.1 重建 + 重启 dsh，手动 `/compact` 一次，**不要发言**。
   - **客观判据**（全部不依赖模型输出）：
     - 自该次 `compaction/end` 起、到下一个 `turn/start` 为止，**不存在**任何 `source.kind === 'user'` 的 `user/message` 事件（即该回合不是被用户输入开启的）；
     - 该 `turn/start` 出现在该次 `command/done` 之后；
@@ -50,18 +50,34 @@
     - 若该回合没有任何 `user/message`（宿主在领取前清除了该输入时的合法形状），记为「宿主清除」并按 `spec` 的「上下文在领取之前被清除」场景判定为通过，不算失败。
   - **观察项**（记录，不作 pass/fail）：该回合的 `step` 数、`tool/call` 数、助手正文长度。模型为核实缺口而调用 `mem_context`/`mem_search` 属预期行为，不计失败。
   - 验证：给出 `compaction/end`、`command/done`、`turn/start`、`user/message` 的 seq 与时刻。
-- [ ] 6.2 在该回合结束后发一句话，确认它被当成独立回合处理。
+  - **实测结果（通过）**：会话 `session-c1f66fd4-8117-4b45-a57a-781c26d748b8`（时刻为 UTC，本地 = UTC+8）。`session/end-seed` seq627334（07:13:43.202，进程重启，新构建生效）→ `command/run` compact seq627335（07:13:59.228，`source.kind=user`）→ `compaction/start` seq627336（`turn: null`）→ `compaction/end` seq627339（07:14:17.780）→ `command/done` seq627340（07:14:17.800，`kind: success`，"Compacted 368 history items (~246672 tokens)."）→ `agent/inbox/spliced` seq627341（07:14:17.811，`target: next-step, start: 0, removedCount: 0, inserted: 1`）→ **`turn/start` seq627342（07:14:17.811，`turn: 37`）**→ `agent/inbox/spliced` seq627343（07:14:17.812，`removedCount: 1`，即领取）→ `step/start` seq627344（`turn: 37, step: 1`）→ `user/message` seq627345（07:14:17.870，`source: {kind: "plugin", plugin: "engram-bridge"}`，正文以召回框架开头）。
+    - 「`compaction/end` → `turn/start` 之间不存在 `source.kind === 'user'` 的 `user/message`」：成立。该区间只有 seq627340（`command/done`）与 seq627341（`agent/inbox/spliced`）两条事件；全会话下一条用户来源的 `user/message` 是 seq627964（07:15:21.062），在 turn 37 结束之后 63 秒。
+    - 「`turn/start` 在 `command/done` 之后」：成立，相隔 11 ms。
+    - 「该回合存在召回文本」：成立（seq627345 即以框架开头）；该回合内其余 `user/message` 均为 `agent-instructions` / `system-prompt snapshot` / `skill-catalog`，无一为用户来源。
+    - 未落入「宿主清除」分支（该回合确有 `user/message`）。
+  - **观察项（记录，不作判据）**：turn 37 共 `step/start` **1** 次、`tool/call` **0** 次、`assistant/message` 1 条、时长 **4.53 s**（07:14:17.811 → 07:14:22.343）。模型未调用 `mem_context`。
+- [x] 6.2 在该回合结束后发一句话，确认它被当成独立回合处理。
   - 验证：该用户消息的 `user/message` 出现在**新的** `turn/start` 之下；不存在「召回占用了一个回合、用户消息仍被推到再下一回」的排布。
-- [ ] 6.3 连续压缩的反馈：自恢复回合进行中再触发一次 `/compact`。
+  - **实测结果（通过）**：turn 37 `turn/end` seq627959（07:14:22.343，`reason: {kind: "completed"}`）→ `agent/inbox/spliced` seq627960（07:15:21.029，`target: next-turn, inserted: 1`）→ **`turn/start` seq627961（07:15:21.031，`turn: 38`）**→ `user/message` seq627964（07:15:21.062，`source: {kind: "user"}`，正文「已重启，已测试」）。
+    - 用户消息落在**独立的 turn 38**，其 `turn/start` 直接由该消息所在的 `agent/inbox/spliced` 触发（`target: next-turn`），中间没有任何召回回合。
+    - 旧排布（召回占 turn N、用户消息被推到 turn N+1）未复现：本轮的召回完整地消耗在 turn 37 内（`removedCount: 1` 的领取发生在 turn/start 之后 1 ms，`step/start` 在其后），用户消息到来时已无待领取的召回。
+- [ ] 6.3 连续压缩的反馈：自恢复回合进行中再触发一次 `/compact`。**未执行——用户决定不跑（2026-09-10）**。
   - 验证（可复现的计数差分）：记录尝试前后 `sqlite3 ~/.engram/engram.db "select count(*) from observations where type='session_summary'"` 的值，断言**不变**；并记录命令层返回的文案为「不可压缩」而非静默失败。
-- [ ] 6.4 关闭开关的行为：在 `~/.dsh/cordis.patch.yml` 的 `engram-bridge` entry 的 `config` 下加 `recallWakeup: false`（该文件热重载），手动 `/compact`。
+  - **归档时的证据等级：源码读取，无真机证据。** 宿主在 `phase !== idle` 时由 `runMaintenance` 同步抛错拒绝压缩——该结论来自宿主生成物原文（见 5.3 的契约核对），本轮未在真机上触发过。
+  - **放弃理由**：该自恢复回合实测仅持续 **4.53 s**（见 6.1 的观察项），人工在其窗口内二次触发不可行；等价替代（在任意运行中的回合里触发 `/compact`）走同一处守卫，但验证的不是本任务指定的触发场景，因此没有用它来顶替。
+  - **归档时 `session_summary` 全局计数 = 18**（`where type='session_summary'`），本会话所在项目内 = 5；若将来补做，以此为基线。
+- [ ] 6.4 关闭开关的行为：在 `~/.dsh/cordis.patch.yml` 的 `engram-bridge` entry 的 `config` 下加 `recallWakeup: false`（该文件热重载），手动 `/compact`。**未执行——用户决定不跑（2026-09-10）**。
   - 验证：该次 `compaction/end` 之后**没有**新的 `turn/start`，直到用户输入出现。
   - **复位步骤（必须做）**：删除该键；`dsh --profile web --dump-config | grep -A20 engram-bridge` 不再出现 `recallWakeup: false`；再压缩一次确认唤醒恢复。残留该键会让默认行为永久失效，且该文件不在仓库内、不进变更记录。
+  - **归档时的证据等级：单元测试 + 接线测试，无真机证据。** spec `specs/engram-compaction-recovery/spec.md:67-68` 的该场景由 `test/compaction.test.ts`（"recallWakeup=false keeps the recall but suppresses the wake"）与 `test/stub-wiring.test.ts` / `test/live-wiring.test.ts` 覆盖。
+  - **放弃理由**：需要临时修改仓库外的 `~/.dsh/cordis.patch.yml` 并在验收后复位，用户选择不在本轮做；未做则**没有留下任何残留键**（该文件本轮未被触碰）。
 
 ## 7. 归档与回写
 
-- [ ] 7.1 `openspec archive engram-bridge-recall-delivery`，delta 落到 `openspec/specs/engram-compaction-recovery/`；回写 Obsidian 项目主档与 engram（`decision` + 真机验收结论）。
+- [x] 7.1 `openspec archive engram-bridge-recall-delivery`，delta 落到 `openspec/specs/engram-compaction-recovery/`；回写 Obsidian 项目主档与 engram（`decision` + 真机验收结论）。
   - 验证：`openspec validate --all --strict` 全绿；主档状态块与 changelog 与实际行为逐条一致；归档后确认长期规格的 `anchors.config_keys` 仍含 `recallWakeup`。
+  - **实测结果（通过）**：`openspec archive engram-bridge-recall-delivery --yes` → `openspec/changes/archive/2026-09-10-engram-bridge-recall-delivery`；delta 落到 `openspec/specs/engram-compaction-recovery/spec.md`（1 modified），`recallWakeup` 仍在长期规格中（`:60` 要求正文、`:81` 场景 WHEN 子句）；`openspec validate --all --strict` **6/6**（活动变更目录消失，总数由 7 降为 6，非失败）。Obsidian 主档 `Projects/202609091151.md` 新增「现状（2026-09-10 15:2x）」一节与 changelog 条目，并给被取代的上一轮条目就地加注；engram 侧新增 observation `#373`（`discovery`，`topic_key=engram-bridge/recall-delivery-acceptance`）。
+  - **注记**：`openspec archive` 报告 `15/18 tasks`（6.3 / 6.4 / 7.1 未勾）。本文件在**首次提交之前**把 7.1 勾上——勘误发生在快照被提交、取得「当时如何」语义**之前**，不构成对已提交快照的改写。6.3 / 6.4 保持未勾，理由见「验收证据等级」一节。
 - [x] 7.2 记录上一轮归档变更的因果更正——**默认不修改 archive**。archive 目录对应已提交的审计快照，追加修订会让它与历史提交分叉、失去「当时如何」的快照性质。落点：本变更 `design.md` 的「成因更正」与「修订记录」两节（已有），加 `docs/engram-upgrade-checklist.md`（7.3 / 5.3）。
   - 验证：本变更 `design.md` 含该两节；`git log --oneline -- openspec/changes/archive/2026-09-10-engram-bridge-p0-fixes/` 在本变更内**无新增提交**。
   - **可选（需用户明确同意）**：若要改 archive，先说明 archive 从此作为「活文档」的新语义并取得同意，再单独提交，注明它是对快照的勘误而非改写。
@@ -72,6 +88,7 @@
 
 - [x] 8.1 自恢复回合会额外触发一次 `agent/turn-stopping` → `mem_capture_passive`（`src/index.ts:250-260` → `src/capture.ts:27-38`）。在 `README.md` 与 `design.md` 的 Risks 中承认这次额外写入，并在 4.2 的 AGENTS.md 改写里豁免该回合的 Key Learnings。
   - 验证：6.1 之后查 `observations` 中该回合是否产生条目（SQL 计数差分，可复现）；若产生，确认其为预期噪声而非重复写入。
+  - **实测结果**：`mem_capture_passive` 确实被调用（源码读：`src/capture.ts:27-38` 在 `enabled` 且文本非空时**无条件**调用，不要求存在 Key Learnings 段），但 engram 抽取 0 条（该回合正文未含 `## Key Learnings:`），**未新增行**。判据：`select max(id) from observations` = **366**（全库），而 `created_at >= '2026-09-10 07:14:22'` 的行数 = **0**（turn 37 的 `turn/end` 在 07:14:22.343）；最新的 5 条 `passive` 行 id 361–365 时刻均为 07:13:25，来自 turn 36。与 README 的「通常不产生新的记忆条目」一致。
 
 ## 执行结果（2026-09-10，实现与门禁）
 
@@ -83,6 +100,26 @@
 - **门禁**：`pnpm typecheck` 通过；`pnpm check:hygiene` ok（全历史 156 文件）；`openspec validate --all --strict` 7/7。
 - **一处未复现的抖动（诚实记录）**：在 `pnpm typecheck && pnpm test && ENGRAM_LIVE=1 pnpm test` 的首次执行中，默认套件报 74 pass / 1 fail；此后相同命令序列与单独 `pnpm test` 共连跑 12 次均 0 fail，未能复现，且**当时没有捕获失败用例名**（操作失误）。已挂后台循环继续观察。候选：池回收的定时器用例，或本变更新增的第二会话（多一次 engram 子进程往返）。
 
-## 待办（等待真机验收）
+## 执行结果（2026-09-10，真机验收 6.1 / 6.2）
 
-- 6.1–6.4 需要重建 + 重启 dsh + 手动 `/compact`；7.1 归档与回写在其后。
+环境：重建 + 重启 `dsh web` 后，新构建生效（同一会话日志内 `session/end-seed` seq627334 早于该次压缩；且注入文本中的自述框架只存在于新构建）。
+
+- **6.1 通过**：手动 `/compact` 后 11 ms 内出现**由召回本身开启**的 `turn/start`（`turn: 37`），其间无任何用户来源消息。
+- **6.2 通过**：随后一句用户消息落在**独立的 turn 38**；旧的「召回占一个回合、用户消息被推后再下一回」排布未复现。
+- **观察项（不作判据）**：turn 37 = 1 step、0 `tool/call`、4.53 s、1 条 assistant 消息。
+- **8.1 核实**：该回合的 `mem_capture_passive` 抽取 0 条，未新增行（全库 `max(id)` 未变）。
+- 完整 seq / 时刻见各任务项的「实测结果」。
+
+## 验收证据等级（归档时的状态）
+
+用户决定不跑 6.3 / 6.4 并直接归档（2026-09-10）。逐项证据等级如下——**未执行项不等同于已通过**，此处如实标注：
+
+| 项 | 状态 | 证据等级 |
+|---|---|---|
+| 6.1 手动压缩后由召回开启独立回合 | 通过 | **真机实测**（seq 与时刻见该项） |
+| 6.2 用户消息落在独立回合 | 通过 | **真机实测**（seq 与时刻见该项） |
+| 6.3 自恢复回合中再次压缩被拒 | **未执行** | 源码读取（宿主 `runMaintenance` 在 `phase !== idle` 时同步抛错）；无真机证据 |
+| 6.4 `recallWakeup: false` 只投不唤醒 | **未执行** | 单元测试 + 接线测试（spec 场景有覆盖）；无真机证据 |
+| 8.1 自恢复回合多一次 `mem_capture_passive` | 核实 | **真机实测**（SQL 计数差分：未新增行） |
+
+若要补做 6.3 / 6.4，按该两项各自的「验证」步骤执行即可，无需改动代码。

@@ -316,3 +316,28 @@ smoke run is the pre-step assembly (system prompt + skill catalog), not reorderi
 6. **`ctx.commands.list(agent)` is a cheap runtime truth source** for "which
    slash commands exist" — it settled the `/clear` question without guessing
    from package names.
+
+---
+
+## Session-event envelope anchors (2026-09-10, added by engram-bridge-p0-fixes)
+
+Why this section exists: the probe below already read `event.data.*`, but this document
+recorded only the *field names* and not the layer they live in — and the implementation
+transcribed the fields as if they were top level. Two capabilities (passive capture,
+compaction recovery) were dead for a day as a result. **Every anchor here states which
+layer the field sits on.**
+
+| Fact | Evidence |
+| --- | --- |
+| A session event is an envelope `{type, seq, time, data, …surfaceMetadata}` | `@deepseek-ai/dsh-session/lib/index.js:1416-1422` (`append` builds a `deepFreeze` with `data: dataSnapshot`) |
+| `snapshotEvents()` returns those envelopes unchanged | same file `:1342-1347` |
+| A `session/event` listener receives `[session, envelope]` | same file `:1427` (`const callbackArgs = [this, event]`) |
+| Key set of a real `assistant/message` | `[type, seq, time, data, sourceEventSeqs, surfaceOp]`, with `data = {turn, step, message, usage}` (real session `session-632a0f3e`) |
+| `SessionEvent` is the discriminated union over `SessionEventMap` | `dsh-session/lib/types/types.d.ts:435-442` |
+| `dsh-session`'s map does **not** contain `compaction/*`; the compaction package declares them by module augmentation | `dsh-compaction/lib/types/types.d.ts:14`, with `compaction/summary` at `:35` and `compaction/end` at `:73` |
+| `agent/*` payloads are NOT envelopes | `agent/turn-stopping` = `{agent, turn, signal}` (`dsh-agent/lib/types/runtime-types.d.ts:305`), `agent/session-start` = `{agent, source}`, `agent/created` = `{agent}`; `agent` is fused in by the dispatcher (`dsh-agent/lib/index.js:335-339`) |
+| The model-visible tool surface is NOT in `request/header.tools` (web/ptc) | `data.header.tools` holds only `[{name:'run_code',…}]`; the tool declaration block is inside `data.header.system` (22 `mcp__engram__*` names, each occurring twice) |
+
+Reproduce the last two rows: decompress a session log with `zstd -dc` (Node's
+`zstdDecompressSync` only yields the first frame) and inspect the `request/header` events.
+

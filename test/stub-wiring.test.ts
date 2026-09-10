@@ -208,6 +208,10 @@ test('stub wiring: capture and compaction recovery react to real host envelopes'
       !host.registrations.includes('mcp__engram__mem_capture_passive'),
       'passive capture must not be registered (single writer)',
     );
+    assert.ok(
+      !host.registrations.includes('mcp__engram__mem_save_prompt'),
+      'prompt capture must not be registered (session log is the source of truth)',
+    );
 
     session.append('turn/start', { turn: 1 });
     const learnings = '## Key Learnings:\n1. stub wiring item with enough characters to extract';

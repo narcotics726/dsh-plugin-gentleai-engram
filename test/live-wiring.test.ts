@@ -125,6 +125,10 @@ test('live wiring: session start, capture and compaction recovery', { skip: !liv
       !registrations.includes('mcp__engram__mem_capture_passive'),
       'the passive-capture tool stays unregistered (single writer)',
     );
+    assert.ok(
+      !registrations.includes('mcp__engram__mem_save_prompt'),
+      'the prompt-capture tool stays unregistered (session log is the source of truth)',
+    );
 
     const db = new DatabaseSync(join(dataDir, 'engram.db'));
     await waitFor(() => {

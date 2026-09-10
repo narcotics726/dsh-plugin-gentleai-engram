@@ -28,6 +28,11 @@ const TOOLS = [
     ),
   },
   {
+    name: 'mem_save_prompt',
+    description: 'Save a user prompt to persistent memory',
+    inputSchema: schema({ content: { type: 'string' }, session_id: { type: 'string' } }, ['content']),
+  },
+  {
     name: 'mem_session_summary',
     description: 'Save an end-of-session summary',
     inputSchema: schema(

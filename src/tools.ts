@@ -52,8 +52,13 @@ export function siteOf(exec: { agent?: unknown }): ToolCallSite {
  * model submit the same text a second time (engram's dedupe only matches identical
  * normalized content, so near-duplicates survive). Unregistered names are rejected by the
  * host with an unknown-tool error, which also closes the folding-tool bypass.
+ *
+ * `mem_save_prompt` is redundant under the dsh topology: dsh already keeps the complete
+ * session log under `~/.dsh/sessions/`, so a model-issued prompt write duplicates what the
+ * host records, while `mem_context`'s Recent Prompts block would inject that stale copy back
+ * into later sessions.
  */
-export const UNREGISTERED_ENGRAM_TOOLS: readonly string[] = ['mem_capture_passive'];
+export const UNREGISTERED_ENGRAM_TOOLS: readonly string[] = ['mem_capture_passive', 'mem_save_prompt'];
 
 /** One ToolDefinition per engram-declared tool, named `mcp__engram__<name>`. */
 export function buildToolDefinitions(

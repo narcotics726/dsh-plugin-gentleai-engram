@@ -6,10 +6,11 @@ import { PassiveCapture } from './capture.js';
 import { CompactionRecovery } from './compaction.js';
 import { Config, type Config as EngramConfig } from './config.js';
 import { applyInjection, chooseProject, type InjectionInputs } from './injection.js';
+import { blocksToText, EventShapeWarnings, readEventPayload, turnFinalText, type SessionEventLike } from './host-events.js';
 import { errorMessage, loggerFrom, type Logger } from './log.js';
 import { McpClient, type McpCallResult, type McpToolDeclaration } from './mcp-client.js';
 import { ConnectionPool } from './pool.js';
-import { isSubagentSession, shadowEngramTools, TOOL_PREFIX } from './subagent.js';
+import { guardEngramTools, isSubagentSession, shadowEngramTools, TOOL_PREFIX } from './subagent.js';
 import { readToolCache, sameToolSurface, toolCacheFingerprint, toolCachePath, writeToolCache } from './tool-cache.js';
 import { buildToolDefinitions, siteOf, type ToolCallSite } from './tools.js';
 
@@ -26,20 +27,13 @@ interface HostLogger {
   error?: (message: string) => void;
 }
 
-interface AgentLike {
-  session?: { header?: { id?: unknown; cwd?: string; origin?: unknown; delegationDepth?: unknown }; snapshotEvents?: () => readonly SessionEventLike[] };
-  inject?: (message: unknown) => void;
-  ctx?: Parameters<typeof shadowEngramTools>[0] extends infer T ? T : never;
-}
+export { turnFinalText };
 
-interface SessionEventLike {
-  type?: unknown;
-  turn?: unknown;
-  interrupted?: unknown;
-  message?: { content?: Array<{ type?: unknown; text?: unknown }> };
-  summary?: Array<{ type?: unknown; text?: unknown }>;
-  compactionId?: unknown;
-  error?: unknown;
+interface AgentLike {
+  session?: { header?: { id?: unknown; cwd?: string; origin?: unknown; delegationDepth?: unknown }; snapshotEvents?: () => readonly unknown[] };
+  inject?: (message: unknown) => void;
+  send?: (message: unknown, target: string, wakeup: boolean) => void;
+  ctx?: Parameters<typeof shadowEngramTools>[0] extends infer T ? T : never;
 }
 
 interface PluginContext {
@@ -49,29 +43,9 @@ interface PluginContext {
   tools: { register(definition: ToolDefinition): () => void };
 }
 
-function blocksToText(blocks: readonly { type?: unknown; text?: unknown }[] | undefined): string {
-  if (!Array.isArray(blocks)) return '';
-  return blocks
-    .map((block) => (block?.type === 'text' && typeof block.text === 'string' ? block.text : undefined))
-    .filter((text): text is string => typeof text === 'string')
-    .join('\n');
-}
-
-/** Final assistant text of one turn, skipping interrupted (partial) messages. */
-export function turnFinalText(session: AgentLike['session'], turn: unknown): string | undefined {
-  const events = typeof session?.snapshotEvents === 'function' ? session.snapshotEvents() : [];
-  let found: string | undefined;
-  for (const event of events) {
-    if (event?.type !== 'assistant/message') continue;
-    if (turn !== undefined && event.turn !== turn) continue;
-    if (event.interrupted === true) continue;
-    found = blocksToText(event.message?.content);
-  }
-  return found;
-}
-
 export function apply(ctx: PluginContext, config: EngramConfig): void {
   const log: Logger = loggerFrom(ctx);
+  const shapeWarnings = new EventShapeWarnings((message) => log.warn(message));
   const envProject = typeof process.env.ENGRAM_PROJECT === 'string' ? process.env.ENGRAM_PROJECT : undefined;
   const registeredNames = new Set<string>();
   const agents = new Map<string, AgentLike>();
@@ -132,6 +106,11 @@ export function apply(ctx: PluginContext, config: EngramConfig): void {
       return ctx.tools.register(definition);
     });
     log.info(`registered ${registeredNames.size} engram tools (${origin})`);
+    // Registration can finish after a sub-agent was created: at creation time there were no
+    // names to deny, so the visibility restriction has to be re-applied now.
+    for (const agent of agents.values()) {
+      if (isSubagentSession(agent.session?.header)) shadowEngramTools(agent as never, [...registeredNames], log);
+    }
   };
 
   const callOnWorkspace = async (
@@ -212,18 +191,22 @@ export function apply(ctx: PluginContext, config: EngramConfig): void {
       }
       return callOnWorkspace(workspace, tool, args, signal);
     },
-    inject: (sessionId, text) => {
+    deliver: (sessionId, text, target) => {
       const agent = agents.get(sessionId);
-      if (typeof agent?.inject !== 'function') {
-        log.warn(`no live agent for session ${sessionId}; skipping post-compaction recall`);
+      if (typeof agent?.send !== 'function') {
+        // Falling back to `agent.inject()` would silently reproduce the discarded-recall bug
+        // this path exists to fix, so a host without `send` is reported instead.
+        log.warn(`no live agent with send() for session ${sessionId}; post-compaction recall was not delivered`);
         return;
       }
       try {
-        agent.inject(
+        agent.send(
           createUserMessage({
             content: [{ type: 'text', text }],
             source: { kind: 'plugin', plugin: name },
           }),
+          target,
+          false,
         );
       } catch (error) {
         log.warn(`post-compaction recall injection failed for session ${sessionId}: ${errorMessage(error)}`);
@@ -258,6 +241,9 @@ export function apply(ctx: PluginContext, config: EngramConfig): void {
     const payload = args[0] as { agent?: AgentLike } | undefined;
     const agent = payload?.agent;
     if (agent === undefined || !isSubagentSession(agent.session?.header)) return;
+    // Two independent halves: the guard holds no matter when registration happens, the
+    // restriction hides the tools once their names are known.
+    guardEngramTools(agent as never, log);
     shadowEngramTools(agent as never, [...registeredNames], log);
   });
 
@@ -268,7 +254,7 @@ export function apply(ctx: PluginContext, config: EngramConfig): void {
     const sessionId = typeof header?.id === 'string' ? header.id : undefined;
     if (sessionId === undefined || isSubagentSession(header)) return;
     const turn = typeof payload?.turn === 'number' ? payload.turn : -1;
-    const text = turnFinalText(agent?.session, turn);
+    const text = turnFinalText(agent?.session, turn, shapeWarnings);
     if (text === undefined) return;
     void capture.capture(sessionId, turn, text, payload?.signal);
   });
@@ -279,15 +265,19 @@ export function apply(ctx: PluginContext, config: EngramConfig): void {
     const sessionId = typeof session?.header?.id === 'string' ? session.header.id : undefined;
     if (sessionId === undefined || event === undefined) return;
     if (event.type === 'compaction/summary') {
-      const compactionId = String(event.compactionId ?? '');
-      if (compactionId === '') return;
-      void compaction.onSummary(sessionId, compactionId, blocksToText(event.summary));
+      const data = readEventPayload(event, 'compaction/summary', (detail) =>
+        shapeWarnings.report(sessionId, 'compaction/summary', detail),
+      );
+      if (data === undefined) return;
+      void compaction.onSummary(sessionId, data.compactionId, blocksToText(data.summary));
       return;
     }
     if (event.type === 'compaction/end') {
-      const compactionId = String(event.compactionId ?? '');
-      if (compactionId === '') return;
-      void compaction.onEnd(sessionId, compactionId, event.error !== undefined);
+      const data = readEventPayload(event, 'compaction/end', (detail) =>
+        shapeWarnings.report(sessionId, 'compaction/end', detail),
+      );
+      if (data === undefined) return;
+      void compaction.onEnd(sessionId, data.compactionId, data.error !== undefined, data.turn);
     }
   });
 

@@ -45,12 +45,24 @@ export function siteOf(exec: { agent?: unknown }): ToolCallSite {
   return { sessionId, workspace };
 }
 
+/**
+ * engram-declared tools the bridge deliberately does NOT register.
+ *
+ * `mem_capture_passive` is the bridge's own turn-final write: registering it would let the
+ * model submit the same text a second time (engram's dedupe only matches identical
+ * normalized content, so near-duplicates survive). Unregistered names are rejected by the
+ * host with an unknown-tool error, which also closes the folding-tool bypass.
+ */
+export const UNREGISTERED_ENGRAM_TOOLS: readonly string[] = ['mem_capture_passive'];
+
 /** One ToolDefinition per engram-declared tool, named `mcp__engram__<name>`. */
 export function buildToolDefinitions(
   declarations: readonly McpToolDeclaration[],
   wiring: ToolWiring,
 ): ToolDefinition[] {
-  return declarations.map((declaration) => ({
+  return declarations
+    .filter((declaration) => !UNREGISTERED_ENGRAM_TOOLS.includes(declaration.name))
+    .map((declaration) => ({
     name: `${TOOL_PREFIX}${declaration.name}`,
     description: declaration.description ?? `engram tool ${declaration.name}`,
     parameters: declaration.inputSchema ?? { type: 'object', properties: {} },
@@ -76,5 +88,5 @@ export function buildToolDefinitions(
       if (result.structuredContent !== undefined) value.structuredContent = result.structuredContent;
       return value;
     },
-  }));
+    }));
 }

@@ -1,19 +1,23 @@
 # Probe overlay for dsh profiles: one global observer plugin.
-#   dsh --profile headless --patch <repo>/scripts/probe/probe.cordis.yml "<task>"
+#   dsh --profile headless --patch <rendered>/probe.cordis.yml "<task>"
 #
-# PROBE_OUT is required (JSONL sink). PROBE_SCENARIO / PROBE_DENY /
-# PROBE_ABORT_AFTER_CHARS select the behaviour under test.
+# This file is a TEMPLATE. The loader interpolates `!!js` only inside an
+# entry's `config` (cordis-plugin-loader `internal/config` handler); a `!!js`
+# `name` is never evaluated and reaches `Entry.import` as a plain object
+# ("name.startsWith is not a function"). The machine-specific absolute paths
+# therefore cannot come from `!!js`, and must not be checked in either:
+# run-probe.sh renders the @@…@@ tokens below into a throwaway copy under the
+# disposable DSH home and passes THAT path to `--patch`.
 #
-# The two machine-specific absolute paths live in the environment, not in this
-# file: PROBE_PLUGIN_MODULE (this overlay's plugin) and PROBE_LLM_MODULE (needed
-# by the steer/abort scenarios). run-probe.sh exports both, so the checked-in
-# overlay stays portable.
+# Tokens (written here spaced so this comment survives rendering):
+#   @@ PROBE_PLUGIN_MODULE @@   @@ PROBE_OUT @@        @@ PROBE_SCENARIO @@
+#   @@ PROBE_DENY @@            @@ PROBE_ABORT_AFTER_CHARS @@   @@ PROBE_LLM_MODULE @@
 - insert:
     - id: probe-events
-      name: !!js process.env.PROBE_PLUGIN_MODULE
+      name: "@@PROBE_PLUGIN_MODULE@@"
       config:
-        out: !!js process.env.PROBE_OUT
-        scenario: !!js process.env.PROBE_SCENARIO ?? 'observe'
-        deny: !!js process.env.PROBE_DENY ?? ''
-        abortAfterChars: !!js Number(process.env.PROBE_ABORT_AFTER_CHARS ?? '8')
-        llmModule: !!js process.env.PROBE_LLM_MODULE ?? ''
+        out: "@@PROBE_OUT@@"
+        scenario: "@@PROBE_SCENARIO@@"
+        deny: "@@PROBE_DENY@@"
+        abortAfterChars: "@@PROBE_ABORT_AFTER_CHARS@@"
+        llmModule: "@@PROBE_LLM_MODULE@@"

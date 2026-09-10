@@ -76,9 +76,30 @@ export PROBE_SCENARIO="$SCENARIO"
 echo "probe: DSH_HOME=$DSH_HOME"
 echo "probe: out=$PROBE_OUT scenario=$SCENARIO deny=${PROBE_DENY:-<none>}"
 
-PATCH_ARGS=(--patch "$REPO/scripts/probe/probe.cordis.yml")
+# The loader interpolates `!!js` only inside an entry's `config`, so the
+# checked-in overlay cannot carry the absolute plugin path through `!!js` (and
+# must not carry it literally — hygiene gate). Render each overlay template into
+# the disposable home and patch from there.
+RENDER_DIR="$PROBE_HOME/rendered"
+mkdir -p "$RENDER_DIR"
+render_overlay() {
+  local src="$1" dst="$2"
+  sed -e "s|@@PROBE_PLUGIN_MODULE@@|$PROBE_PLUGIN_MODULE|g" \
+      -e "s|@@PROBE_OUT@@|$PROBE_OUT|g" \
+      -e "s|@@PROBE_SCENARIO@@|$PROBE_SCENARIO|g" \
+      -e "s|@@PROBE_DENY@@|${PROBE_DENY:-}|g" \
+      -e "s|@@PROBE_ABORT_AFTER_CHARS@@|${PROBE_ABORT_AFTER_CHARS:-8}|g" \
+      -e "s|@@PROBE_LLM_MODULE@@|${PROBE_LLM_MODULE:-}|g" \
+      "$src" > "$dst"
+}
+
+render_overlay "$REPO/scripts/probe/probe.cordis.yml" "$RENDER_DIR/probe.cordis.yml"
+PATCH_ARGS=(--patch "$RENDER_DIR/probe.cordis.yml")
 for extra in ${PROBE_EXTRA_PATCHES:-}; do
-  case "$extra" in /*) PATCH_ARGS+=(--patch "$extra") ;; *) PATCH_ARGS+=(--patch "$REPO/scripts/probe/$extra") ;; esac
+  case "$extra" in /*) src="$extra" ;; *) src="$REPO/scripts/probe/$extra" ;; esac
+  dst="$RENDER_DIR/$(basename "$src")"
+  render_overlay "$src" "$dst"
+  PATCH_ARGS+=(--patch "$dst")
 done
 
 STATUS=0

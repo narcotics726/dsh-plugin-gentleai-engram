@@ -9,7 +9,7 @@ throwaway: nothing under `openspec/`, `src/`, `~/.dsh` or `~/.engram` is touched
 | file | role |
 | --- | --- |
 | `probe-events.mjs` | the Cordis plugin under test: subscribes to the agent-plane events and to `session/event`, appends one JSONL line per fact |
-| `probe.cordis.yml` | `--patch` overlay that inserts the plugin as a global row; config comes from `PROBE_*` env, with the two absolute paths (`PROBE_PLUGIN_MODULE`, `PROBE_LLM_MODULE`) exported by `run-probe.sh` so the checked-in overlay holds no local path |
+| `probe.cordis.yml` | `--patch` overlay **template** that inserts the plugin as a global row; `run-probe.sh` substitutes the `@@…@@` tokens into a rendered copy inside the throwaway DSH home, so the checked-in file holds no local path. It cannot use `!!js` for `name`: the loader interpolates `!!js` only inside an entry's `config` (cordis-plugin-loader's `internal/config` handler), so a `!!js` `name` reaches `Entry.import` as a plain object — `failed to import loader entry probe-events ([object Object]): name.startsWith is not a function` |
 | `probe-compact.cordis.yml` | second overlay that forces `compaction-basic` into pressure (tiny threshold + one-token retained tail) |
 | `run-probe.sh` | bounded runner: builds a throwaway DSH home, boots `dsh --profile headless`, cleans up |
 | `out/` | probe run artifacts — **gitignored, never committed**; the findings quote excerpts instead. Machine paths are redacted to `<repo>`/`~` when written |
@@ -72,8 +72,46 @@ when running unattended.
 | --- | --- |
 | `observe` | log only |
 | `abort` | on the root agent's first N text-delta chars of `assistant/chunk`, call `agent.cancel({ kind: 'user' })` (N = `PROBE_ABORT_AFTER_CHARS`) |
-| `restrict` | on `agent/created` for a child (`header.origin === 'subagent'`), install `agent.ctx.tools.restrict({ deny: PROBE_DENY })`, log `schemas()` before/after and try executing each denied tool |
+| `restrict` | on `agent/created` for a child (`header.origin === 'subagent'`), install `agent.ctx.tools.restrict({ deny: PROBE_DENY })`, log `schemas()` before/after and try executing each denied tool — the **EARLY** install |
+| `restrict-late` | do nothing at `agent/created`; install the same mask on the child only at its **first `step/end`**, i.e. after one request was already composed and sent from the unrestricted catalog. Also calls `restrict()` with never-registered names and records the verbatim outcome (throw text or silence) — the **LATE** install |
+| `restrict-in-prestep` | install the mask inside the child's **own `agent/pre-step`** waterfall, i.e. after that step's tool directory is already frozen — the **TIGHTEST** late install, which prices the freeze boundary |
 | `steer` | on the first `agent/turn-stopping` for the root agent, `agent.steer(...)` once |
+
+## Install-timing runs (per-agent tool masking)
+
+The child task must call a tool at least once: a step that calls a tool is always
+followed by another step, so a "one command per step" prompt guarantees a second
+`request/header` for the child.
+
+```bash
+cd <repo>
+
+CHILD='Run these three bash commands one per step, waiting for each result before starting the next: first echo child-step-one, then echo child-step-two, then echo child-step-three. Then reply with the single word: child-done. Never put two bash calls in the same step.'
+TASK="Call the subagent tool exactly once with prompt: '$CHILD' and run_in_background: false. After the subagent returns, reply with the single word: parent-done."
+
+export PROBE_DENY=web_search,web_fetch,todo_write
+
+# early  (agent/created)                  -> child's FIRST header already masked
+./scripts/probe/run-probe.sh child-early restrict "$TASK"
+
+# late   (child's first step/end)         -> 1st header unmasked, 2nd masked
+./scripts/probe/run-probe.sh child-late restrict-late "$TASK"
+
+# tight  (child's own agent/pre-step)     -> current header unmasked, next masked
+./scripts/probe/run-probe.sh child-prestep restrict-in-prestep "$TASK"
+```
+
+Read the child's headers out of the JSONL:
+
+```bash
+node -e 'for (const l of require("fs").readFileSync(process.argv[1],"utf8").trim().split("\n")) {
+  const r = JSON.parse(l)
+  if (r.type === "request/header" && r.origin === "subagent")
+    console.log(r.i, r.t.toFixed(1), r.reason, r.toolCount, JSON.stringify((r.tools||[]).filter((n)=>n.startsWith("web_")||n==="todo_write")))
+  else if (r.type === "probe/restrict-late" || r.type === "probe/restrict-in-prestep")
+    console.log(r.i, r.t.toFixed(1), r.type, JSON.stringify(r.removed), JSON.stringify(r.unknownOutcomes ?? null))
+}' scripts/probe/out/child-late.jsonl
+```
 
 ## Env
 

@@ -14,7 +14,7 @@
 | 会话绑定 | `agent/session-start` → `mem_session_start({ id: dsh 会话 id, directory: 工作区 })`，读回 engram 解析出的 project；绑定是工具调用的屏障 |
 | 隐式参数注入 | 声明 `project` 的工具注入项目名；`mem_session_start` 注入 `directory`，其 `id` 由插件强制；声明 `session_id` 的工具注入当前 dsh 会话 id。调用方显式传参优先 |
 | 被动捕获 | `agent/turn-stopping` 取该回合最后一条未被中断的助手文本，交给 `mem_capture_passive`（`source: dsh-turn-stopping`）；同一 (会话, 回合) 只捕获一次。**桥是唯一写入者**：该工具对模型不可见、被调用时由宿主以未知工具错误拒绝（桥自身的写入走后端调用，不经工具面）。落库判据：`observations.tool_name='dsh-turn-stopping'`。engram 的抽取门槛是**空白分隔的 token 数**（纯 CJK 整句 = 1 个 token，会被判为太短而丢弃；条目要用空格分开的词 + 具体标识符，且无条数上限：实测 10 条全留） |
-| 压缩恢复 | `compaction/summary` → `mem_session_summary`（摘要文本直接落库；**摘要文本为空时不提交，但记一条带 `compactionId` 的 warn**；engram 不写 `sessions.summary` 列，摘要在 `observations` 的 `session_summary` 行）；`compaction/end` 未报错时用 `mem_context` 取最近记忆，按 `recoveryTokenBudget` 截断后**投递到该次压缩所归属的收件边界**：`turn === null`（turn 之间的独立手动事务）投 `next-turn`、否则投 `next-step`。**不用 `agent.inject()`**——它等价于投 `next-step`，会在手动压缩收尾时被丢弃（实测 `outcome: canceled`） |
+| 压缩恢复 | `compaction/summary` → `mem_session_summary`（摘要文本直接落库；**摘要文本为空时不提交，但记一条带 `compactionId` 的 warn**；engram 不写 `sessions.summary` 列，摘要在 `observations` 的 `session_summary` 行）；`compaction/end` 未报错时用 `mem_context` 取最近记忆，包上自述框架并按 `recoveryTokenBudget` 截断后投递。**时机由该次压缩所属回合决定**：压缩被某个回合包住（`turn` 为数字）时不唤醒，由该回合在下一个 step 边界领取；独立手动压缩（`turn` 为 `null`）**唤醒驱动器**，召回立即成为一轮独立的自恢复回合，不等用户开口。插件不引入任何额外等待，也不依赖某个具体的收件队列名（宿主会在相位已中止时重分类边界、在 agent disposed 时让唤醒输入停放）。`recallWakeup: false` 可抑制唤醒，但那是**已知退化模式**——召回停等期间会被 cancellation/disposal 清除 |
 | 子 agent 隔离 | 两层：**执行期 guard**（按 `mcp__engram__` 前缀拒绝调用，与工具注册时序无关）+ **可见面 restrict**（注册完成后对已存在的子 agent 补装）；经 `mcp_call` 之类旁路的调用同样被拒 |
 | 事件契约 | 只从宿主会话事件的**信封载荷**（`event.data.*`）读取；载荷缺失、或读取点依赖的字段缺失/类型不符时记一条 **warn**（每会话每事件类型至多一条），不静默丢弃；不新增会话事件类型 |
 | 失败降级 | engram 缺失 / 握手失败 / 超时 → 不注册工具 + 一条错误日志，不阻断模型轮次。调用超时只表示桥不再等待：**不重试、不重复提交**，后端可能迟到落库（事务原子性保证无半写） |
@@ -47,7 +47,8 @@ dsh plugin --profile open-design add <repo>
 | `injectSessionId` | `true` | 是否注入 `session_id` |
 | `capturePassive` | `true` | 是否解析回合收尾的 `## Key Learnings:` 并送 `mem_capture_passive` |
 | `compactionRecovery` | `true` | 压缩时持久化摘要并在压缩后注入记忆 |
-| `recoveryTokenBudget` | `800` | 压缩后注入的 token 预算 |
+| `recoveryTokenBudget` | `800` | 压缩后注入的 token 预算（含自述框架；框架的份额先预留，所以召回正文不会把框架挤掉） |
+| `recallWakeup` | `true` | 手动压缩后是否唤醒一轮独立的自恢复回合。置 `false` 只投递不唤醒（**已知退化模式**：召回停等期间可被 cancellation/disposal 清除），用于拒绝「每次 `/compact` 多一个 LLM 回合」的成本 |
 
 项目名解析顺序：**显式参数 > `projectOverrides` > 该会话由 engram 解析出的项目名 > `ENGRAM_PROJECT` > 不注入**。插件不用目录名兜底；`mem_save_prompt` 的 `project` 不注入（保留给歧义恢复）。
 
@@ -55,6 +56,12 @@ dsh plugin --profile open-design add <repo>
 
 - **工具**：engram 工具以 `mcp__engram__*` 出现在模型工具面（N−1：被动捕获工具不注册）；对子 agent 不可见。
 - **隐式参数**：见「能力」表与项目名解析顺序；调用方显式传参一律不覆盖，`mem_session_start` 的 `id` 由插件持有。
-- **提示词**：不新增 system prompt 段；压缩恢复通过 `agent.send(message, target, false)` 注入一条 user 消息（`target` 见「压缩恢复」行；不唤醒空闲驱动器），落在会话日志里可重建。
+- **提示词**：不新增 system prompt 段；压缩恢复通过 `agent.send(message, target, wakeup)` 注入一条 user 消息（`target` / `wakeup` 见「压缩恢复」行），落在会话日志里可重建。注入文本自述来源，且措辞不假设该回合是否已带用户输入。
 - **会话日志**：不新增事件类型。
 - **失败**：engram 不可用时相关能力失效并记日志，不阻断模型轮次。
+
+## 成本与已知副作用
+
+- **每次手动 `/compact` 多一个 LLM 回合**：召回要成为一轮独立的自恢复回合，即使用户不打算继续。可用 `recallWakeup: false` 拒绝（代价见该配置项）。
+- **自恢复回合进行期间不能再次压缩**：压缩走宿主的 maintenance 相位，相位非 idle 时宿主直接拒绝，命令层返回 "Compaction is unavailable because this process has an active compaction, or the agent is not idle."。改动前 `/compact` 结束后立即回到 idle、连按两次可行；现在需要等这一轮跑完。
+- **自恢复回合会多一次被动捕获写入**：该回合同样以 `agent/turn-stopping` 收尾并调用一次 `mem_capture_passive`。`~/.dsh/AGENTS.md` 已豁免该回合的 `## Key Learnings:` 收尾，因此通常不产生新的记忆条目；若模型仍然输出，会多一条观测。

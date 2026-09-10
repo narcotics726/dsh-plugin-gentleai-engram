@@ -71,11 +71,16 @@ HOME="$PROBE_HOME" /opt/homebrew/bin/engram mcp    # 或 spawn 时把 env.HOME �
 
 复测四项（详见 `docs/event-findings.md`）：中止回合是否触发 `agent/turn-stopping`、`agent/created` 窗口能否 `restrict`、`session-start` 的 source 集合、`session-start` 是否先于首个回合。
 
-再加两项（2026-09-10 由 `engram-bridge-p0-fixes` 补入，判据见 `docs/event-findings.md` 的「Session-event envelope anchors」）：
+再补五条（1–2 于 2026-09-10 由 `engram-bridge-p0-fixes` 补入，3 被 `engram-bridge-recall-delivery` 改写，4–5 由后者新增；判据见 `docs/event-findings.md` 的「Session-event envelope anchors」）：
 
 1. **会话事件仍是信封**：随机解压一个会话日志，确认 `assistant/message` 事件的 key 集合仍含 `data`（而不是把 `turn`/`message` 平铺到顶层）。若宿主改变该形状，插件会以一条 warn（每会话每事件类型一条）暴露，而不是静默失效。
 2. **工具面声明块的位置**：`request/header.data.header.system` 里 `mcp__engram__*` 的唯一名字数应等于 `~/.dsh/storages/engram-bridge/tools.json` 的声明数 **减 1**（被动捕获工具不注册）；`data.header.tools` 在 web/ptc 档只有 `run_code`，不能当判据。
-3. **压缩事务的所有者与投递边界**：`compaction/end` 的 `data.turn` 仍应为 `number | null`（`null` = turn 之间的独立手动事务），且 `agent.send(message, target, wakeup)` 仍应是公开成员。手动 `/compact` 后，会话日志里的 `agent/inbox/spliced` 应出现 `target: 'next-turn'` 且随后**没有** `outcome: 'canceled'` 的撤销。若 `send` 消失或 turn 语义变化 → 插件记一条 warn 且不投递（不会静默复现「投递后被丢弃」）。
+3. **压缩事务的所有者与投递边界**：`compaction/end` 的 `data.turn` 仍应为 `number | null`（`null` = turn 之间的独立手动事务），且 `agent.send(message, target, wakeup)` 仍应是公开成员。
+   **判据（2026-09-10 由 `engram-bridge-recall-delivery` 改写）**：手动 `/compact` 之后、用户输入**之前**，会话日志里出现由该召回开启的 `turn/start`（自该次 `compaction/end` 起到它为止不存在任何 `source.kind === 'user'` 的 `user/message`）。
+   旧判据「`agent/inbox/spliced` 出现 `target: 'next-turn'` 且随后没有 `outcome: 'canceled'`」已废弃：改动后仍会通过，却证明不了投递被保住——`outcome: 'canceled'` 也可由宿主生命周期清除或插件 `inbox.remove` 产生（日志里 seq 398372 就是 `dsh-agent-instructions` 的 remove，不是压缩收尾）。
+   若 `send` 消失或 turn 语义变化 → 插件记一条 warn 且不投递（不会静默复现「投递后被丢弃」）。
+4. **宿主收件队列的批次规则**：`Inbox.claim(target, turn)` 应仍是「取走**整列** `next-step` + **1 条** `next-turn`」（`dsh-agent/lib/types/inbox.js`）。这决定了每条 `next-turn` 消息自成一个回合，也决定了插件为何把召回投到 `next-step`。若改成「整列 next-turn」→ 手动压缩后的召回会与用户消息合并，自恢复回合消失（退化不致命，但行为变化）。
+5. **唤醒与相位的三条语义**：`send` 在**相位已 abort** 时会把 `wakeup=true` 的目标重分类为 `next-turn`；`wakeDriver` 的锁存条件是 `reason?.kind !== 'disposed' && (kind === 'maintenance' || wakeAfterAbort)`；**agent 已 disposal** 时唤醒输入停在队列无人领取（`a disposed cancel leaves it parked`）。任一改动的影响：边界重分类 → 插件不依赖队列名，无影响；锁存条件变化 → 维护相位期间的唤醒可能不再重放，自恢复回合延迟到下一次唤醒；disposed 停放 → 该次压缩不产生回合（宿主语义，插件已按通过处理）。
 
 ## 6. 端到端
 

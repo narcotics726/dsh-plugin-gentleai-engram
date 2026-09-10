@@ -13,9 +13,9 @@ scripts/probe/tmp/
 # Probe run artifacts: local evidence, never committed (see scripts/probe/README.md).
 scripts/probe/out/
 
-# Review artifacts produced by interactive agent workflows (Theseus
-# `user-readiness-review` and its relatives): <phase>.review.md. They record the
-# operator's own answers, verdicts and assessed understanding, so they stay
-# local-only. Keep them on disk next to the change they belong to; use
-# `git add -f` if one is ever meant to be published deliberately.
+# Review artifacts produced by interactive agent review workflows:
+# <phase>.review.md. They record the operator's own answers, verdicts and
+# assessed understanding, so they stay local-only. Keep them on disk next to the
+# change they belong to; use `git add -f` if one is ever meant to be published
+# deliberately.
 *.review.md

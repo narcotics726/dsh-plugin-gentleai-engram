@@ -11,7 +11,7 @@
 ```bash
 export PROBE_HOME="$(pwd)/.upgrade-probe-home"
 mkdir -p "$PROBE_HOME"
-HOME="$PROBE_HOME" /opt/homebrew/bin/engram mcp    # 或 spawn 时把 env.HOME 换成它
+HOME="$PROBE_HOME" engram mcp    # engram 需在 PATH 上（或写它的绝对路径）；spawn 时等价于把 env.HOME 换成它
 ```
 
 （写实验前先 `mem_session_start` 建会话行，否则 `mem_capture_passive` 以 `FOREIGN KEY constraint failed (787)` 失败。）
@@ -52,9 +52,9 @@ HOME="$PROBE_HOME" /opt/homebrew/bin/engram mcp    # 或 spawn 时把 env.HOME �
 | 重复提交同一文本 | `duplicates>0`，不重复写入 |
 | `mem_capture_passive({source: 'X'})` 的落点 | `observations.tool_name` = `'X'`（该表**没有** `source` 列，也没有回合列）；marker 同时出现在 `title`/`content` 里 |
 
-**若阈值变化** → 更新 README / spec 的说明（插件本身不重实现提取）。
+**若阈值变化** → 更新相关 spec 与本清单（插件本身不重实现提取）。
 
-**落库判据**：真机验收用 `observations.tool_name='dsh-turn-stopping'` 定位桥的自动捕获（已由隔离实验证实 `source` → `tool_name`）。若该映射变化 → 判据改走 `title`/`content` 定位，并同步 README。
+**落库判据**：真机验收用 `observations.tool_name='dsh-turn-stopping'` 定位桥的自动捕获（已由隔离实验证实 `source` → `tool_name`）。若该映射变化 → 判据改走 `title`/`content` 定位，并同步本清单。
 
 ## 4. 多进程并发
 
@@ -74,7 +74,7 @@ HOME="$PROBE_HOME" /opt/homebrew/bin/engram mcp    # 或 spawn 时把 env.HOME �
 再补五条（1–2 于 2026-09-10 由 `engram-bridge-p0-fixes` 补入，3 被 `engram-bridge-recall-delivery` 改写，4–5 由后者新增；判据见 `docs/event-findings.md` 的「Session-event envelope anchors」）：
 
 1. **会话事件仍是信封**：随机解压一个会话日志，确认 `assistant/message` 事件的 key 集合仍含 `data`（而不是把 `turn`/`message` 平铺到顶层）。若宿主改变该形状，插件会以一条 warn（每会话每事件类型一条）暴露，而不是静默失效。
-2. **工具面声明块的位置**：`request/header.data.header.system` 里 `mcp__engram__*` 的唯一名字数应等于 `~/.dsh/storages/engram-bridge/tools.json` 的声明数 **减 1**（被动捕获工具不注册）；`data.header.tools` 在 web/ptc 档只有 `run_code`，不能当判据。
+2. **工具面声明块的位置**：`request/header.data.header.system` 里 `mcp__engram__*` 的唯一名字数应等于 `$DSH_HOME/storages/engram-bridge/tools.json` 的声明数 **减 1**（被动捕获工具不注册）；`data.header.tools` 在 web/ptc 档只有 `run_code`，不能当判据。
 3. **压缩事务的所有者与投递边界**：`compaction/end` 的 `data.turn` 仍应为 `number | null`（`null` = turn 之间的独立手动事务），且 `agent.send(message, target, wakeup)` 仍应是公开成员。
    **判据（2026-09-10 由 `engram-bridge-recall-delivery` 改写）**：手动 `/compact` 之后、用户输入**之前**，会话日志里出现由该召回开启的 `turn/start`（自该次 `compaction/end` 起到它为止不存在任何 `source.kind === 'user'` 的 `user/message`）。
    旧判据「`agent/inbox/spliced` 出现 `target: 'next-turn'` 且随后没有 `outcome: 'canceled'`」已废弃：改动后仍会通过，却证明不了投递被保住——`outcome: 'canceled'` 也可由宿主生命周期清除或插件 `inbox.remove` 产生（日志里 seq 398372 就是 `dsh-agent-instructions` 的 remove，不是压缩收尾）。

@@ -27,7 +27,7 @@
 - [x] 4.1 `README.md`：压缩恢复行改写为「手动压缩后以唤醒方式投递、成为一轮独立回合」；配置表加 `recallWakeup` 并标注关闭后是**已知退化模式**（停等期间可被生命周期清除）；补成本提示「自恢复回合进行期间再次 `/compact` 会被宿主拒绝」。同时改正 `:17` 的机制句——原句把 seq 303820/303821 的撤销写成「手动压缩收尾时被丢弃」，而宿主契约原文只说 pending 输入可被 **cancellation 或 disposal** 丢弃。
   - 验证：`grep -n 'recallWakeup\|不可压缩\|cancellation' README.md`；逐条比对 2.1 的语义。
 - [x] 4.2 `~/.dsh/AGENTS.md` After compaction 段：① 删除与事实矛盾的那句（`recall arrives together with your next message`）；② 把「read the recall → mem_context → continue working」改成「自恢复回合只做一句轻量确认，等用户发言再开工」；③ 明确豁免自恢复回合的 `## Key Learnings:` 收尾。
-  - 验证：把改写后的**完整段落原文**写进仓库内镜像 `docs/agents-after-compaction.md`（本变更新增），使审计不依赖仓库外文件；并比对 `~/.dsh/AGENTS.md` 与镜像一致。
+  - 验证：把改写后的**完整段落原文**写进仓库内镜像 `docs/agents-after-compaction.md`（本变更新增），使审计不依赖仓库外文件；并比对机器本地的 `AGENTS.md` 与镜像一致。（该镜像属个人配置，后来已从仓库移除。）
 - [x] 4.3 修正源码/测试注释里被推翻的因果：`src/compaction.ts:5-11` 与 `test/compaction.test.ts:88-92`。改法统一为「pending 输入可被宿主的 cancellation/disposal 丢弃（宿主契约原文）；本次实测中该撤销先于 `session/end-seed` 17.3 秒，成因未被钉死」。
   - 验证：`grep -rn '收尾' src/compaction.ts test/compaction.test.ts` 无命中。
 

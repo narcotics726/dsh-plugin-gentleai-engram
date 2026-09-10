@@ -13,18 +13,16 @@ source, unless a paragraph says otherwise.
   `agent/*` and `session/event`), logs to `scripts/probe/out/` — **gitignored, the
   raw logs are not committed**; every excerpt below is quoted from a real run
 - dsh package version: `0.1.2-rc.1`; the global install has **no `.git`**, so no commit hash exists
-- engram: `1.20.0` (`/opt/homebrew/bin/engram` → `Cellar/engram/1.20.0/bin/engram`)
+- engram: `1.20.0`
 - node: `v26.7.0`; probed 2026-09-09
 - Timestamps: `t` = milliseconds since the probe plugin's `apply` ran
 - Method and re-run instructions: `scripts/probe/README.md`
 
 **Why a throwaway DSH home:** `dsh` rewrites
-`$DSH_HOME/profiles/<name>/cordis.yml` on every boot, and this session's file
-sandbox forbids writes under `~/.dsh`. All runs therefore use a throwaway
+`$DSH_HOME/profiles/<name>/cordis.yml` on every boot, so probing a real profile
+in place is a write to the user's home. All runs therefore use a throwaway
 home **outside the repository** (`DSH_HOME=${TMPDIR:-/tmp}/dsh-engram-probe-home`)
-with only
-`.credentials.yaml`/`settings.yaml` copied in. `~/.dsh` was never written
-(its `profiles/headless/cordis.yml` mtime stayed `Sep 7 14:29`).
+with only `.credentials.yaml`/`settings.yaml` copied in.
 
 ---
 
@@ -311,8 +309,8 @@ smoke run is the pre-step assembly (system prompt + skill catalog), not reorderi
    child-only policy — and `restrict()` there provably reaches the child's first
    model request.
 5. **Booting any dsh profile rewrites `$DSH_HOME/profiles/<name>/cordis.yml`.**
-   Probing `~/.dsh` profiles in place is therefore a write to `~/.dsh`; redirect
-   `DSH_HOME` for any probe (this sandbox refuses the write outright).
+   Probing a real profile in place is therefore a write to the user's home;
+   point `DSH_HOME` elsewhere for any probe.
 6. **`ctx.commands.list(agent)` is a cheap runtime truth source** for "which
    slash commands exist" — it settled the `/clear` question without guessing
    from package names.

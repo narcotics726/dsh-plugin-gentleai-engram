@@ -6,7 +6,7 @@
 
 | 事实 | 证据 |
 | --- | --- |
-| `mem_current_project` 用进程 cwd 解析项目 | 实测返回 `intranet-aio`（与当时会话工作区无关） |
+| `mem_current_project` 用进程 cwd 解析项目 | 实测返回 MCP 进程 cwd 所在的项目名，与 dsh 会话工作区无关 |
 | `mem_session_start(directory=X)` 用 X 解析，返回 `project`/`project_source` | 实测 `config` / `git_root` 均正确 |
 | `mem_save` 优先用 session 的项目 | 实测 `project_source: session` |
 | `mem_capture_passive` / `mem_session_end` 的**项目**只取 cwd（不接受 `project` 参数）；**归属仍由传入的 `session_id` 决定** | 实测：`project_source: git_root`、落到 cwd 项目，但 observation 的 `session_id` 为传入值 |

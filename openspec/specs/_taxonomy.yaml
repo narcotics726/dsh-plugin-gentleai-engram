@@ -1,8 +1,7 @@
 version: 1
 
 # Minimal local taxonomy for this repository's long-lived specs.
-# Created by change: engram-bridge-p0 (there was no taxonomy before, so the
-# metadata criteria of theseus-spec-writing-standard could not be evaluated).
+# Created by change: engram-bridge-p0 (no taxonomy existed before it).
 
 metadata:
   status: active

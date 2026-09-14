@@ -21,6 +21,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "pnpm build && node --test test/*.test.ts",
+    "check:boundary": "node scripts/check-recall-boundary.mjs",
     "check:hygiene": "node scripts/check-hygiene.mjs --history",
     "check:hygiene:staged": "node scripts/check-hygiene.mjs --staged",
     "prepare": "test -d .githooks && git config core.hooksPath .githooks || true"
@@ -43,7 +44,8 @@
   },
   "dependencies": {
     "@deepseek-ai/dsh-llm": "0.1.2-rc.1",
-    "@deepseek-ai/schemastery": "^3.18.2"
+    "@deepseek-ai/schemastery": "^3.18.2",
+    "onnxruntime-web": "1.29.0"
   },
   "packageManager": "pnpm@9.15.9+sha512.68046141893c66fad01c079231128e9afb89ef87e2691d69e4d40eee228988295fd4682181bae55b58418c3a253bde65a505ec7c5f9403ece5cc3cd37dcf2531"
 }

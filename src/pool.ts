@@ -145,6 +145,17 @@ export class ConnectionPool {
       if (this.#disposed) throw new Error('engram-bridge: connection pool is disposed');
       try {
         const client = await this.#connect(workspace);
+        // `dispose()` may have run while the child was starting. Registering the
+        // entry now would leak it: dispose already iterated the table, so nothing
+        // would ever close this connection — the child would outlive the plugin.
+        if (this.#disposed) {
+          try {
+            client.close();
+          } catch {
+            /* a connection we refuse to keep is discarded either way */
+          }
+          throw new Error('engram-bridge: connection pool is disposed');
+        }
         const entry: PoolEntry = { workspace, client, tools: client.tools, lastUsed: this.#now(), inFlight: 0 };
         this.#entries.set(workspace, entry);
         this.#evictOverLimit(workspace);

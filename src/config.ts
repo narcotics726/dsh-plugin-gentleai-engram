@@ -1,4 +1,37 @@
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import z from '@deepseek-ai/schemastery';
+import type { CoverageVariant } from './recall/scoring.js';
+
+/** `$DSH_HOME` when set, else `~/.dsh` — the same rule as the tool-surface cache. */
+export function dshHome(env: NodeJS.ProcessEnv = process.env): string {
+  return env.DSH_HOME !== undefined && env.DSH_HOME !== '' ? env.DSH_HOME : join(homedir(), '.dsh');
+}
+
+/** engram's own data directory; the bridge never sets it, but must read the DB. */
+export function engramDataDir(env: NodeJS.ProcessEnv = process.env): string {
+  return env.ENGRAM_DATA_DIR !== undefined && env.ENGRAM_DATA_DIR !== ''
+    ? env.ENGRAM_DATA_DIR
+    : join(homedir(), '.engram');
+}
+
+/**
+ * Default locations, derived at call time for a directly-constructed config
+ * (tests, embedders) that omits the keys. `$DSH_HOME/storages/engram-bridge/`
+ * is where the tool-surface cache already lives, so the derived index and the
+ * explicitly installed model sit next to established plugin state.
+ */
+export function defaultSearchIndexDir(): string {
+  return join(dshHome(), 'storages', 'engram-bridge', 'index');
+}
+
+export function defaultSearchModelDir(): string {
+  return join(dshHome(), 'storages', 'engram-bridge', 'model');
+}
+
+export function defaultSearchDbPath(): string {
+  return join(engramDataDir(), 'engram.db');
+}
 
 /** Resolved plugin configuration; defaults live in the schema below. */
 export interface Config {
@@ -35,6 +68,31 @@ export interface Config {
    * cancellation or disposal.
    */
   recallWakeup: boolean;
+  /**
+   * Read layer: whether the plugin's own retrieval tool is usable. Checked at
+   * the call site, not at registration, so flipping it never changes the tool
+   * surface. Unrelated to `recallWakeup`, which is about post-compaction recall.
+   */
+  searchEnabled: boolean;
+  /** engram's SQLite database (the source of truth the derived index follows). */
+  searchDbPath: string;
+  /** Derived state: the read index (rebuildable, deletable, outside sync/backup). */
+  searchIndexDir: string;
+  /** Model + pruned runtime directory; installed explicitly, never downloaded. */
+  searchModelDir: string;
+  /** `ort.env.wasm.numThreads`. Resident memory is almost entirely this number. */
+  embedThreads: number;
+  /** Reclaim the resident recall worker after this much idle time; 0 disables it. */
+  searchIdleMs: number;
+  /** How often the plugin sweeps the idle recall worker itself (>= 1000). */
+  searchSweepIntervalMs: number;
+  /** Per-retrieval budget; on expiry the worker is killed and the call fails. */
+  searchTimeoutMs: number;
+  /** Coverage-boost weight. Tuned on P2 and confirmed held out on P3. */
+  searchW: number;  /** How far down the lexical ordering the coverage boost reaches. */
+  searchTopK: number;
+  /** Coverage variant. `field_cov` is the validated default. */
+  searchCoverage: CoverageVariant;
 }
 
 export const Config: z<Config> = z.object({
@@ -52,4 +110,22 @@ export const Config: z<Config> = z.object({
   compactionRecovery: z.boolean().default(true),
   recoveryTokenBudget: z.number().default(800),
   recallWakeup: z.boolean().default(true),
+  // Read layer. New keys use the `search*` prefix on purpose: `recallWakeup`
+  // above already means "post-compaction recall", an unrelated feature, so
+  // reusing `recall*` here would make two different things look like one.
+  searchEnabled: z.boolean().default(true),
+  searchDbPath: z.string().default(defaultSearchDbPath()),
+  searchIndexDir: z.string().default(defaultSearchIndexDir()),
+  searchModelDir: z.string().default(defaultSearchModelDir()),
+  embedThreads: z.number().min(1).default(1),
+  searchIdleMs: z.number().default(600000),
+  searchSweepIntervalMs: z.number().min(1000).default(60000),
+  searchTimeoutMs: z.number().default(60000),
+  // Written with the trailing zero the reference's `DEFAULT_W` uses; the change's
+  // verification greps this literal and requires exactly one hit, and this schema
+  // default is the only place `w` may be declared (see index-db.ts's SCORING for
+  // the constants that belong to the index instead).
+  searchW: z.number().default(0.20),
+  searchTopK: z.number().default(50),
+  searchCoverage: z.union([z.const('field_cov'), z.const('cov_n'), z.const('idf_cov')]).default('field_cov'),
 });

@@ -202,3 +202,35 @@ test('a persistent failure rejects and is not cached', async () => {
   assert.equal(pool.size, 0);
   pool.dispose();
 });
+
+test('dispose during connect closes the late connection instead of leaking it', async () => {
+  // The race: `dispose()` iterates the entry table at a moment when a workspace
+  // connection is still being established. Registering it afterwards would leave
+  // a live engram child behind for the rest of the host process's life.
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let closed = 0;
+  const { pool } = makePool({
+    connect: async (workspace: string) => {
+      await gate;
+      return {
+        tools: [{ name: 'mem_save' }],
+        workspace,
+        close(): void {
+          closed += 1;
+        },
+      };
+    },
+  });
+
+  const pending = pool.withConnection('/late', async () => 'never');
+  await flush();
+  pool.dispose();
+  release?.();
+
+  await assert.rejects(() => pending, /disposed/);
+  assert.equal(closed, 1, '晚到的连接必须被关闭，而不是登记进已清空的表');
+  assert.equal(pool.size, 0);
+});

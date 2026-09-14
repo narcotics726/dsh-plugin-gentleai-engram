@@ -47,8 +47,11 @@ dsh（Cordis）插件：把 engram MCP 后端接入 dsh。**接入层，不是�
 
 ```bash
 pnpm typecheck && pnpm test && pnpm build
+pnpm check:boundary           # 硬规则 7 的机制：宿主入口的 import 闭包不得触及嵌入运行时
 pnpm check:hygiene            # 门禁：全历史扫密钥/本机路径/个人邮箱/禁止路径
 ```
+
+- 读层的模型与裁剪后的运行时**不在仓库里**，走显式安装：`node scripts/install-recall-model.mjs --model-dir <dir> [--model-from <本机缓存>]`（约 110 MB）。缺失时检索**在调用点**响亮失败，不静默下载。
 
 - 门禁：`.githooks/pre-commit`（暂存区 + 提交身份）与 `.githooks/pre-push`（全历史）由 `pnpm install` 的 `prepare` 自动启用（`core.hooksPath=.githooks`）；推送前 `pnpm check:hygiene` 必须通过。
 - 加载验证：`dsh --profile web --dump-config | grep engram-bridge`（恰好一次）→ 启动 `dsh web` 看加载日志。

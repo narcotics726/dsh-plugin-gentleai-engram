@@ -1,15 +1,25 @@
 import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
 import { SessionBindings, type Binding } from './bindings.js';
 import { PassiveCapture } from './capture.js';
 import { CompactionRecovery } from './compaction.js';
-import { Config, type Config as EngramConfig } from './config.js';
+import {
+  Config,
+  defaultSearchDbPath,
+  defaultSearchIndexDir,
+  defaultSearchModelDir,
+  type Config as EngramConfig,
+} from './config.js';
 import { applyInjection, chooseProject, type InjectionInputs } from './injection.js';
 import { blocksToText, EventShapeWarnings, readEventPayload, turnFinalText, type SessionEventLike } from './host-events.js';
 import { errorMessage, loggerFrom, type Logger } from './log.js';
 import { McpClient, type McpCallResult, type McpToolDeclaration } from './mcp-client.js';
 import { ConnectionPool } from './pool.js';
+import { RecallProcessManager, RecallUnavailableError } from './recall/process.js';
+import type { RecallPayload, RecallQuery } from './recall/protocol.js';
+import { buildRecallToolDefinition, RECALL_INPUT_SCHEMA, RECALL_TOOL_NAME } from './recall-tool.js';
 import { guardEngramTools, isSubagentSession, shadowEngramTools, TOOL_PREFIX } from './subagent.js';
 import { readToolCache, sameToolSurface, toolCacheFingerprint, toolCachePath, writeToolCache } from './tool-cache.js';
 import { buildToolDefinitions, siteOf, type ToolCallSite } from './tools.js';
@@ -87,6 +97,41 @@ export function apply(ctx: PluginContext, config: EngramConfig): void {
     'engram-bridge.pool-sweep',
   );
 
+  // ---- read layer (derived, read-only, outside the engram connection pool) ---
+  // The resident recall worker is a SEPARATE lifecycle from the engram pool: it
+  // serves a derived local index, needs its own threads/memory budget, and is
+  // reclaimed on its own clock. Sharing `poolMaxIdleMs`/`poolSweepIntervalMs`
+  // would put two unrelated resources behind one knob.
+  const recallDeclaration: McpToolDeclaration = {
+    name: 'mem_bridge_recall',
+    inputSchema: RECALL_INPUT_SCHEMA as McpToolDeclaration['inputSchema'],
+  };
+  const recallManager = new RecallProcessManager({
+    dbPath: config.searchDbPath ?? defaultSearchDbPath(),
+    indexPath: join(config.searchIndexDir ?? defaultSearchIndexDir(), 'index.db'),
+    modelDir: config.searchModelDir ?? defaultSearchModelDir(),
+    threads: config.embedThreads ?? 1,
+    w: config.searchW ?? 0.2,
+    topK: config.searchTopK ?? 50,
+    coverage: config.searchCoverage ?? 'field_cov',
+    idleMs: config.searchIdleMs ?? 600000,
+    timeoutMs: config.searchTimeoutMs ?? 60000,
+    log,
+  });
+  ctx.effect(() => () => void recallManager.dispose(), 'engram-bridge.recall-process');
+  ctx.effect(
+    () => {
+      if ((config.searchIdleMs ?? 600000) <= 0) return; // 0 disables idle reclaim
+      const intervalMs = Math.max(1000, config.searchSweepIntervalMs ?? 60000);
+      const timer = setInterval(() => {
+        if (recallManager.sweep() > 0) log.debug('reclaimed the idle recall worker');
+      }, intervalMs);
+      timer.unref?.();
+      return () => clearInterval(timer);
+    },
+    'engram-bridge.recall-sweep',
+  );
+
   let disposers: Array<() => void> = [];
   let registeredSurface: readonly McpToolDeclaration[] = [];
   const registerTools = (declarations: readonly McpToolDeclaration[], origin: string): void => {
@@ -105,6 +150,18 @@ export function apply(ctx: PluginContext, config: EngramConfig): void {
       registeredNames.add(definition.name);
       return ctx.tools.register(definition);
     });
+    // The plugin's own retrieval entry point joins the same registration pass, so
+    // the surface has exactly one lifecycle: registered together, removed
+    // together. Its name shares the `mcp__engram__` prefix, so the sub-agent
+    // visibility restriction already covers it.
+    const recallDefinition = buildRecallToolDefinition({
+      // Slightly larger than the worker's own budget so our clearer timeout
+      // message wins the race against the host's generic one.
+      timeoutMs: config.searchTimeoutMs + 10000,
+      run: runRecall,
+    });
+    registeredNames.add(recallDefinition.name);
+    disposers.push(ctx.tools.register(recallDefinition));
     log.info(`registered ${registeredNames.size} engram tools (${origin})`);
     // Registration can finish after a sub-agent was created: at creation time there were no
     // names to deny, so the visibility restriction has to be re-applied now.
@@ -163,6 +220,69 @@ export function apply(ctx: PluginContext, config: EngramConfig): void {
       finalArgs.id = site.sessionId;
     }
     return await callOnWorkspace(site.workspace, declaration.name, finalArgs, signal);
+  }
+
+  /**
+   * Retrieval entry point. Three things are decided here rather than deeper,
+   * because they are policy and the worker only knows mechanics:
+   *
+   *  1. the engine switch is checked at the CALL SITE, so flipping it never
+   *     changes the tool surface and never silently substitutes another
+   *     retriever;
+   *  2. when project injection is off, or the project simply cannot be resolved,
+   *     the call is REJECTED instead of running unrestricted — a default that
+   *     silently stops isolating is worse than a loud refusal (design D3);
+   *  3. `project` goes through the same injection path as the engram tools, so an
+   *     explicit caller value always wins.
+   */
+  async function runRecall(
+    request: RecallQuery,
+    exec: { agent?: unknown; signal?: AbortSignal },
+  ): Promise<RecallPayload> {
+    if (config.searchEnabled === false) {
+      throw new RecallUnavailableError(
+        'disabled',
+        'engram-bridge: 检索能力已关闭（searchEnabled=false）。本次调用没有执行任何检索，' +
+          '也不会静默改用别的检索实现。',
+      );
+    }
+    const wantsAll = request.allProjects === true;
+    if (!wantsAll && request.project === undefined && config.injectSessionProject === false) {
+      throw new RecallUnavailableError(
+        'project-unknown',
+        'engram-bridge: 项目注入已关闭（injectSessionProject=false），且本次调用没有显式指定 project，' +
+          '无法把检索限定在某个项目上。为保持"默认只返回当前项目"，本次检索被拒绝。' +
+          '两条出路：显式传 project，或打开 injectSessionProject；也可以传 all_projects: true 明确要求跨项目。',
+      );
+    }
+    const site = siteOf(exec as { agent?: unknown });
+    let sessionProject: string | undefined = bindings.peek(site.sessionId)?.project;
+    if (sessionProject === undefined && config.injectSessionProject !== false) {
+      try {
+        sessionProject = (await bindings.ensure(site.sessionId, site.workspace)).project;
+      } catch {
+        // Left undefined on purpose: the call below then fails loudly with a
+        // "cannot determine the project" reason rather than running unrestricted.
+      }
+    }
+    const injected = applyInjection(
+      recallDeclaration,
+      { ...request, ...(request.project === undefined ? {} : { project: request.project }) },
+      injectionInputs(site, sessionProject),
+    );
+    const project = typeof injected.project === 'string' && injected.project !== '' ? injected.project : undefined;
+    if (!wantsAll && project === undefined) {
+      throw new RecallUnavailableError(
+        'project-unknown',
+        'engram-bridge: 项目限定无从判定（会话项目尚未解析出，也没有 projectOverrides / ENGRAM_PROJECT）。' +
+          '为保持"默认只返回当前项目"，本次检索被拒绝。两条出路：显式传 project，或传 all_projects: true 明确跨项目。',
+      );
+    }
+    return await recallManager.query({
+      ...request,
+      project,
+      ...(wantsAll ? { allProjects: true } : {}),
+    });
   }
 
   const capture = new PassiveCapture({

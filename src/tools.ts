@@ -57,8 +57,17 @@ export function siteOf(exec: { agent?: unknown }): ToolCallSite {
  * session log under `~/.dsh/sessions/`, so a model-issued prompt write duplicates what the
  * host records, while `mem_context`'s Recent Prompts block would inject that stale copy back
  * into later sessions.
+ *
+ * `mem_search` is replaced by this plugin's own retrieval entry point. Its engram-side
+ * retrieval tokenizes CJK as whole punctuation-delimited runs with a default AND, which
+ * measured R@10 = 0.0000 / 0.0520 on the two frozen proxies; keeping it registered would
+ * leave a second, broken retrieval path behind the same tool list.
  */
-export const UNREGISTERED_ENGRAM_TOOLS: readonly string[] = ['mem_capture_passive', 'mem_save_prompt'];
+export const UNREGISTERED_ENGRAM_TOOLS: readonly string[] = [
+  'mem_capture_passive',
+  'mem_save_prompt',
+  'mem_search',
+];
 
 /** One ToolDefinition per engram-declared tool, named `mcp__engram__<name>`. */
 export function buildToolDefinitions(

@@ -46,6 +46,17 @@ const TOOLS = [
     inputSchema: schema({ project: { type: 'string' }, limit: { type: 'number' } }, []),
   },
   {
+    // The real engram declares a retrieval tool too. The bridge deliberately does
+    // NOT register it (the plugin's own entry point replaces it), so the stub has
+    // to declare it for that exclusion to be exercised in the default gate.
+    name: 'mem_search',
+    description: 'Full-text search over memories',
+    inputSchema: schema(
+      { query: { type: 'string' }, project: { type: 'string' }, match_mode: { type: 'string' }, limit: { type: 'number' } },
+      ['query'],
+    ),
+  },
+  {
     name: 'mem_save',
     description: 'Save an observation',
     inputSchema: schema({ title: { type: 'string' }, content: { type: 'string' }, type: { type: 'string' } }, ['title']),

@@ -4,7 +4,8 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
-import { ALGO_VERSION, IndexDb, MAX_INLINE_SYNC_DOCS, SCORING, SOURCE_HASH_FORMULA, contentSha, inspectIndex, readSourceState } from '../dist/recall/index-db.js';
+import { ALGO_VERSION, IDENTITY_META_KEY, IndexDb, MAX_INLINE_SYNC_DOCS, SCORING, SOURCE_HASH_FORMULA, contentSha, inspectIndex, readSourceState } from '../dist/recall/index-db.js';
+import { EXPECTED_IDENTITY, expectedIdentityDigest } from '../dist/recall/model-expected.js';
 import { Scorer } from '../dist/recall/scoring.js';
 import { dot, expectedSourceHash, fakeEmbedder, removeDir, tempDir, writeSource, type SourceRow } from './recall-support.ts';
 
@@ -289,7 +290,7 @@ test('进程在更新中途被 SIGKILL：索引仍可用、无残留标记、下
   }
 });
 
-test('inspectIndex 判定缺失 / 无 meta / 算法版本不符', () => {
+test('inspectIndex 判定缺失 / 无 meta / 算法版本不符 / 模型身份不符', () => {
   const dir = tempDir();
   try {
     const indexPath = indexOf(dir);
@@ -299,10 +300,47 @@ test('inspectIndex 判定缺失 / 无 meta / 算法版本不符', () => {
     const index = IndexDb.recreate(indexPath);
     assert.equal(inspectIndex(indexPath).needsFullBuild, true, '尚未建成的索引（source_hash 为空）需要全量重建');
     index.handle.exec("INSERT OR REPLACE INTO meta VALUES ('source_hash','abc')");
+    // 更早版本建的索引没有模型身份键：无从判断它属于哪一份模型，按需要重建对待。
+    assert.equal(inspectIndex(indexPath).needsFullBuild, true);
+    assert.equal(inspectIndex(indexPath).reason, 'no-meta');
+    index.handle.exec(`INSERT OR REPLACE INTO meta VALUES ('${IDENTITY_META_KEY}','另一代')`);
+    assert.equal(inspectIndex(indexPath).needsFullBuild, true);
+    assert.equal(inspectIndex(indexPath).reason, 'model-mismatch');
+    index.handle.exec(`INSERT OR REPLACE INTO meta VALUES ('${IDENTITY_META_KEY}','${expectedIdentityDigest()}')`);
     assert.equal(inspectIndex(indexPath).needsFullBuild, false);
     assert.equal(inspectIndex(indexPath).algoVersion, ALGO_VERSION);
     index.handle.exec("UPDATE meta SET value='bigram-live-v1' WHERE key='algo_version'");
     assert.equal(inspectIndex(indexPath).reason, 'algo-mismatch');
+    index.close();
+  } finally {
+    removeDir(dir);
+  }
+});
+
+test('[7.1] 只在模型权重上换代也判需要重建', () => {
+  const dir = tempDir();
+  try {
+    const indexPath = indexOf(dir);
+    const real = expectedIdentityDigest();
+    // 唯一差别是模型权重：换个运行时文件或换排序方式也会让摘要变，但那是别的
+    // 性质；这里要钉死的是「摘要确实覆盖权重」。
+    const swappedWeights = expectedIdentityDigest({
+      ...EXPECTED_IDENTITY,
+      files: EXPECTED_IDENTITY.files.map((file, index) =>
+        index === 0 ? { ...file, sha256: '0'.repeat(64) } : file,
+      ),
+    });
+    assert.notEqual(swappedWeights, real, '只换模型权重也必须换摘要');
+
+    const index = IndexDb.recreate(indexPath);
+    index.handle.exec("INSERT OR REPLACE INTO meta VALUES ('source_hash','abc')");
+    index.handle.exec(`INSERT OR REPLACE INTO meta VALUES ('${IDENTITY_META_KEY}','${real}')`);
+
+    assert.equal(inspectIndex(indexPath, real).needsFullBuild, false, '同一代 → 不需要重建');
+    const swapped = inspectIndex(indexPath, swappedWeights);
+    assert.equal(swapped.needsFullBuild, true, '换代 → 需要重建，而不是拿旧向量作答');
+    assert.equal(swapped.reason, 'model-mismatch');
+    assert.equal(swapped.storedIdentity, real, '要把盘上那一代报出来');
     index.close();
   } finally {
     removeDir(dir);

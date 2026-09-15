@@ -113,6 +113,48 @@ node -e 'for (const l of require("fs").readFileSync(process.argv[1],"utf8").trim
 }' scripts/probe/out/child-late.jsonl
 ```
 
+## 模型完整性验收（`run-model-integrity.sh`）
+
+`engram-bridge-model-integrity` 的 8.1–8.4 用一套**独立**的 runner：把**真实插件**（本仓库
+`dist/index.js`）装进一个一次性 headless 宿主，并让 `searchModelDir` 指向一个宿主**可写**的
+模型目录，好让"内容不符"这件事真的发生。
+
+| file | role |
+| --- | --- |
+| `model-integrity.cordis.yml` | overlay **模板**：插入 `engram-bridge` 行；`command` / `env` / `searchDbPath` / `searchIndexDir` / `searchModelDir` / 回收时长都由 runner 渲染，checked-in 文件不含本机路径 |
+| `run-model-integrity.sh` | 建一次性 home（含 engram 库**副本**，免得探测写进用户的真实库）、渲染 overlay、跑 `dsh --profile headless` |
+
+```bash
+# 默认：把真机模型目录复制一份进一次性 home，改那一份
+./scripts/probe/run-model-integrity.sh hot 'Call the tool mcp__engram__mem_bridge_recall ten times, one call per step …'
+
+# 直接对着真机共享目录跑（需要能写它；期间同机其它 profile 的检索会失败）
+MODEL_INTEGRITY_MODEL_DIR=~/.dsh/storages/engram-bridge/model MODEL_INTEGRITY_TAMPER=1 \
+  ./scripts/probe/run-model-integrity.sh real-dir '<task>'
+```
+
+| var | meaning |
+| --- | --- |
+| `MODEL_INTEGRITY_MODEL_DIR` | 模型目录；给了就直接用，不给就复制真机那份 |
+| `MODEL_INTEGRITY_TAMPER=1` | boot **之前**把 `tokenizer_config.json` 改一个字节，并留下 `.good` 备份 |
+| `MODEL_INTEGRITY_HOME` | 一次性 home（默认在 `$TMPDIR`；放仓库内时用 `.accept/`，已 gitignore） |
+| `MODEL_INTEGRITY_REUSE_HOME=1` | 复用已有的模型副本（让篡改跨运行存活） |
+| `MODEL_INTEGRITY_IDLE_MS` | worker 空闲回收，默认 2000（好让判定在冷路径被触发） |
+
+读它的会话日志（判据 = `request/header` 的 `data.header.tools` 名字列表 + `tool/result` 文本）：
+
+```bash
+zstd -dc <home>/sessions/*/session-*/session.v3.jsonl.zstd
+```
+
+两点实测注意：
+
+- **在一个全新 home 里第一次跑**：`tools.json` 缓存为空，插件要等 MCP 连接完成才注册 engram
+  工具，而一次性任务在 boot 后立刻组第一个请求——于是首个工具面里**没有** `mem_bridge_recall`，
+  模型看不到它。第二次运行（缓存已写入）起正常。活宿主不受影响。
+- 宿主的 workspace 就是那个一次性 home，所以**只有** home 内的路径能被它的 `bash` 改；要动真机
+  模型目录，得从有写权限的 shell 跑（`MODEL_INTEGRITY_MODEL_DIR` 已把这件事做成参数）。
+
 ## Env
 
 | var | meaning |

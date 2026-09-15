@@ -7,7 +7,7 @@ import { Context } from '@deepseek-ai/cordis';
 import { SessionStore } from '@deepseek-ai/dsh-session';
 import { apply } from '../dist/index.js';
 import { injectionForTool } from '../dist/injection.js';
-import { fakeModelDir, removeDir, tempDir, writeSource } from './recall-support.ts';
+import { expectedOf, fakeModelDir, removeDir, tempDir, writeSource } from './recall-support.ts';
 
 /**
  * Wiring tests for the retrieval entry point.
@@ -148,7 +148,11 @@ async function rig(
     searchTopK: 50,
     searchCoverage: 'field_cov' as const,
   };
-  apply(host.ctx, config);
+  const modelDir = config.searchModelDir;
+  // The plugin's read layer judges each spawn against the declared identity;
+  // this wiring test runs on a synthetic fixture, so it injects the matching
+  // one through the test-only dependency seam (design D11).
+  apply(host.ctx, config, { expectedModel: expectedOf(modelDir) });
   return {
     host,
     temp,

@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, rmSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { codePointCompare, codePointLength, tokenize, type Token } from './tokenizer.js';
+import { expectedIdentityDigest } from './model-expected.js';
 
 /**
  * Derived read index: schema, transactional source snapshot, incremental sync,
@@ -178,17 +179,34 @@ export function readSourceState(dbPath: string): SourceState {
 
 export interface IndexInspection {
   needsFullBuild: boolean;
-  reason: 'missing' | 'unreadable' | 'no-meta' | 'algo-mismatch' | 'ok';
+  reason: 'missing' | 'unreadable' | 'no-meta' | 'algo-mismatch' | 'model-mismatch' | 'ok';
   storedHash?: string;
   algoVersion?: string;
+  storedIdentity?: string;
 }
+
+/**
+ * Meta key holding the identity of the model/runtime the vectors were computed
+ * with.
+ *
+ * It has to cover the model WEIGHTS. The `vectors.model` column is a coarse tag
+ * (`bge`), and the runtime's directory fingerprint does not change when
+ * `model_optimized.onnx` is swapped — so without this key a model change would
+ * be invisible, and the index would keep answering from the previous vector
+ * space: the new model's query vector compared against the old model's document
+ * vectors, silently and indefinitely (design D10).
+ */
+export const IDENTITY_META_KEY = 'embedding_identity';
 
 /**
  * Cheap pre-flight check, done BEFORE opening the index for use. A full build is
  * expensive and must not happen inside the resident (low-thread) process: the
  * caller uses this to route the build to a temporary high-thread process.
  */
-export function inspectIndex(indexPath: string): IndexInspection {
+export function inspectIndex(
+  indexPath: string,
+  identityDigest: string = expectedIdentityDigest(),
+): IndexInspection {
   if (!existsSync(indexPath)) return { needsFullBuild: true, reason: 'missing' };
   let db: DatabaseSync | undefined;
   try {
@@ -201,7 +219,23 @@ export function inspectIndex(indexPath: string): IndexInspection {
     }
     const storedHash = meta.get('source_hash');
     if (storedHash === undefined || storedHash === '') return { needsFullBuild: true, reason: 'no-meta' };
-    return { needsFullBuild: false, reason: 'ok', storedHash, algoVersion };
+    const storedIdentity = meta.get(IDENTITY_META_KEY);
+    // No key at all means the index predates this check: it cannot be told
+    // apart from one built by another model, so it is treated as needing a
+    // rebuild rather than as trustworthy.
+    if (storedIdentity === undefined || storedIdentity === '') {
+      return { needsFullBuild: true, reason: 'no-meta', storedHash, algoVersion };
+    }
+    if (storedIdentity !== identityDigest) {
+      return {
+        needsFullBuild: true,
+        reason: 'model-mismatch',
+        storedHash,
+        algoVersion,
+        storedIdentity,
+      };
+    }
+    return { needsFullBuild: false, reason: 'ok', storedHash, algoVersion, storedIdentity };
   } catch {
     return { needsFullBuild: true, reason: 'unreadable' };
   } finally {
@@ -250,6 +284,13 @@ export interface SyncOptions {
   hashMs?: number;
   /** Force a wipe-and-rebuild instead of a delta. */
   full?: boolean;
+  /**
+   * Identity of the model/runtime the vectors being written were computed with.
+   * Defaults to the repository's declaration, the same value `inspectIndex`
+   * compares against — one accessor, so the writer and the checker cannot drift
+   * apart (design D10).
+   */
+  identityDigest?: string;
 }
 
 /**
@@ -529,7 +570,7 @@ export class IndexDb {
         insVec.run(docId, VECTOR_MODEL, vec.length, new Uint8Array(vec.buffer, vec.byteOffset, vec.byteLength));
       }
 
-      this.recomputeMeta(state);
+      this.recomputeMeta(state, options.identityDigest);
       this.db.prepare("DELETE FROM meta WHERE key='update_prefix'").run();
       this.db.exec('COMMIT');
     } catch (error) {
@@ -574,7 +615,7 @@ export class IndexDb {
     }
   }
 
-  private recomputeMeta(state: SourceState): void {
+  private recomputeMeta(state: SourceState, identityDigest?: string): void {
     const nTerms = (this.db.prepare('SELECT count(*) AS c FROM terms').get() as { c: number }).c;
     const nPostings = (this.db.prepare('SELECT count(*) AS c FROM postings').get() as { c: number }).c;
     const sums = this.db
@@ -582,6 +623,11 @@ export class IndexDb {
       .get() as { t: number; c: number };
     const meta: Record<string, string> = {
       algo_version: ALGO_VERSION,
+      // The generation these vectors belong to. Recorded on every sync, full or
+      // incremental: an incremental update recomputes only the changed
+      // documents, so if this were written by full builds alone, a model swap
+      // followed by a delta would leave one index holding two vector spaces.
+      [IDENTITY_META_KEY]: identityDigest ?? expectedIdentityDigest(),
       // Recorded for the same reason the reference records it: it is a property of
       // how the index was built (CJK bigrams only, no per-character unigrams). The
       // bridge has no unigram mode, so it is a constant until one exists — and if

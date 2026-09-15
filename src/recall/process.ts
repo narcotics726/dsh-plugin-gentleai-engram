@@ -3,8 +3,15 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { availableParallelism } from 'node:os';
 import { errorMessage, type Logger } from '../log.js';
-import { missingModelParts, ModelUnavailableError } from './model-dir.js';
-import type { RecallErrorKind, RecallPayload, RecallQuery, WorkerFrame } from './protocol.js';
+import { assertExpectedIdentity, missingModelParts, ModelUnavailableError } from './model-dir.js';
+import type { ExpectedIdentity } from './model-expected.js';
+import {
+  REBUILD_RUNTIME_MISSING_EXIT,
+  type RecallErrorKind,
+  type RecallPayload,
+  type RecallQuery,
+  type WorkerFrame,
+} from './protocol.js';
 import type { CoverageVariant } from './scoring.js';
 
 /**
@@ -47,6 +54,13 @@ export interface RecallWorkerOptions {
   /** Per-call budget; on expiry the worker is killed and the call fails. */
   timeoutMs: number;
   log: Logger;
+  /**
+   * The declared identity each spawn is judged against. Defaults to the
+   * repository's declaration; tests inject a matching one because their fixtures
+   * are synthetic bytes. Deliberately NOT a config key: the judgement must not
+   * become "whatever the user declared" (design D11).
+   */
+  expected?: ExpectedIdentity;
   /** Overrides for tests / diagnostics. */
   workerPath?: string;
   execPath?: string;
@@ -107,6 +121,7 @@ export class RecallProcessManager {
     if (this.closed) throw new RecallUnavailableError('internal', 'engram-bridge: 检索进程已卸载');
     if (this.child !== undefined) return;
     if (this.starting !== undefined) return await this.starting;
+    this.assertUsable();
     const starting = (async (): Promise<void> => {
       const child = spawn(this.options.execPath ?? process.execPath, [this.workerPath], {
         env: this.childEnv(this.options.threads),
@@ -221,14 +236,46 @@ export class RecallProcessManager {
    * is missing AND the runtime is missing, the reported failure is the runtime.
    * `model-dir.ts` is pure `node:fs`/`node:path`, so importing it here does not
    * weaken the host-entry boundary.
+   *
+   * Presence only, and on purpose (design D1): this runs on EVERY call — it is
+   * the cheap guard that keeps a swept-away installation from becoming a
+   * confusing child exit — so it must never hash anything. The identity
+   * judgement is a different check with a different frequency
+   * (`assertUsable`, before each spawn).
    */
   assertInstalled(): void {
     const missing = missingModelParts(this.options.modelDir);
     if (missing.length > 0) {
       throw new RecallUnavailableError(
         'runtime-missing',
-        new ModelUnavailableError(this.options.modelDir, missing).message,
+        new ModelUnavailableError(
+          this.options.modelDir,
+          missing.map((part) => ({ kind: 'missing' as const, path: part.path, what: part.what })),
+        ).message,
       );
+    }
+  }
+
+  /**
+   * Judge the installation against the declared identity, before spawning.
+   *
+   * Placement is load-bearing (design D1). It sits after `start()`'s three
+   * early-return guards and before the async body on purpose:
+   *
+   * - before the guards it would re-hash ~110 MB on every `query()`;
+   * - inside the async body the rejection would land on the derived
+   *   `starting` promise, which no caller handles, and the host's fail-loud
+   *   `unhandledRejection` hook would exit(1) — turning "a 110 MB artifact is
+   *   wrong" into "dsh is dead" (design D4).
+   *
+   * Failing here spawns nothing and caches nothing, which is what makes the
+   * next call recover once the cause is gone.
+   */
+  private assertUsable(): void {
+    try {
+      assertExpectedIdentity(this.options.modelDir, this.options.expected);
+    } catch (error) {
+      throw new RecallUnavailableError('runtime-missing', errorMessage(error));
     }
   }
 
@@ -254,6 +301,7 @@ export class RecallProcessManager {
     const threads = this.options.rebuildThreads ?? defaultRebuildThreads();
     this.options.log.info(`开始全量重建派生索引（${threads} 线程，用后即退）`);
     await this.stop('rebuild');
+    this.assertUsable();
     let output = '';
     const code = await new Promise<number>((resolve, reject) => {
       const child = spawn(
@@ -282,8 +330,11 @@ export class RecallProcessManager {
     const summary = output.trim().split('\n').filter((line: string) => line !== '').join(' | ');
     if (code !== 0) {
       this.options.log.error(`全量重建失败（exit=${code}）：${summary}`);
+      // A model/runtime failure is reported as such, not as a generic rebuild
+      // failure: the spec keeps the two apart, and only the child can tell
+      // (design D7).
       throw new RecallUnavailableError(
-        'internal',
+        code === REBUILD_RUNTIME_MISSING_EXIT ? 'runtime-missing' : 'internal',
         `engram-bridge: 全量重建派生索引失败。${summary}`,
       );
     }

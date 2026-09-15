@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Unofficial dsh (Cordis) plugin bridging the engram persistent-memory MCP backend: per-workspace connection pool, session binding, project injection, passive capture, and compaction recovery.",
+  "engines": {
+    "node": ">=24"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {

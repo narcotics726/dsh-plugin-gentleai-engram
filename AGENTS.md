@@ -51,7 +51,9 @@ pnpm check:boundary           # 硬规则 7 的机制：宿主入口的 import �
 pnpm check:hygiene            # 门禁：全历史扫密钥/本机路径/个人邮箱/禁止路径
 ```
 
-- 读层的模型与裁剪后的运行时**不在仓库里**，走显式安装：`node scripts/install-recall-model.mjs --model-dir <dir> [--model-from <本机缓存>]`（约 110 MB）。缺失时检索**在调用点**响亮失败，不静默下载。
+- 读层的模型与裁剪后的运行时**不在仓库里**，走显式安装：`node scripts/install-recall-model.mjs --model-dir <dir> [--model-from <本机缓存>]`（约 110 MB）。**先 `pnpm build`**（脚本从 `dist/` 读仓库里的期望身份声明）。缺失**或内容与声明不符**时检索**在调用点**响亮失败：该次检索失败、宿主不退出、同一会话后续回合照常，恢复文件后**紧接着的下一次检索**即可用（不需要重启）。不静默下载，也不自动重装。安装与 `--check` 都按该声明判定并区分「缺失/不符」；`node scripts/verify-model-expected.mjs` 可独立复核声明本身。
+- 同一台机器上的所有 profile 请保持同一插件版本：模型目录与索引目录是共享的，判定依据却是各 profile 自己的声明；声明不同的两个版本会互相判失败、互相触发全量重建（本期不解决，根治方向是按身份分目录）。
+- Node 下限见 `package.json` 的 `engines`（`>=24`，实测下限），不做运行期断言。
 
 - 门禁：`.githooks/pre-commit`（暂存区 + 提交身份）与 `.githooks/pre-push`（全历史）由 `pnpm install` 的 `prepare` 自动启用（`core.hooksPath=.githooks`）；推送前 `pnpm check:hygiene` 必须通过。
 - 加载验证：`dsh --profile web --dump-config | grep engram-bridge`（恰好一次）→ 启动 `dsh web` 看加载日志。

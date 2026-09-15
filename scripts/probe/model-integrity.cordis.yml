@@ -1,0 +1,20 @@
+# Acceptance overlay (TEMPLATE) for engram-bridge-model-integrity 8.1-8.4.
+#
+# Loads the REAL engram bridge, built from this repository, into a throwaway
+# headless host and points it at a model directory the host can actually write
+# (a copy of the machine's, by default). Rendered by run-model-integrity.sh: the
+# checked-in file holds no machine path, and none may be added.
+- insert:
+    - id: engram-bridge
+      name: "@@BRIDGE_MODULE@@"
+      config:
+        command: "@@ENGRAM_BIN@@"
+        env:
+          ENGRAM_DATA_DIR: "@@ENGRAM_DATA_DIR@@"
+        searchEnabled: true
+        searchDbPath: "@@DB_PATH@@"
+        searchIndexDir: "@@INDEX_DIR@@"
+        searchModelDir: "@@MODEL_DIR@@"
+        searchIdleMs: @@IDLE_MS@@
+        searchSweepIntervalMs: @@SWEEP_MS@@
+        searchTimeoutMs: 180000

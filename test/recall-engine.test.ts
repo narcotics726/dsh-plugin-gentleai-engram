@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { RecallEngine } from '../dist/recall/engine.js';
+import { RecallEngine, RebuildNeededError } from '../dist/recall/engine.js';
 import { docText, fakeEmbedder, removeDir, tempDir, writeSource, type SourceRow } from './recall-support.ts';
 
 /**
@@ -80,8 +80,51 @@ async function engineWith(spec: ReadonlyArray<{ id: number; cos: number; type?: 
   };
 }
 
-test('筛选不影响任何条目的得分，也不改变相对顺序', async () => {
-  const f = await engineWith([
+test('[7.1] 换代后索引整体重建，而不是拿旧模型的向量作答', async () => {
+  const rows = rankedRows([{ id: 1, cos: 0.99 }]);
+  const dir = tempDir();
+  const dbPath = join(dir, 'source.db');
+  const indexPath = join(dir, 'index.db');
+  writeSource(dbPath, rows);
+  const options = {
+    dbPath,
+    indexPath,
+    w: 0.2,
+    topK: 50,
+    coverage: 'field_cov' as const,
+    dim: DIM,
+    embedder: async () => fakeEmbedder({ dim: DIM, vectors: withVectors(rows, [{ id: 1, cos: 0.99 }]) }),
+  };
+  const before = new RecallEngine({ ...options, identityDigest: '上一代' });
+  const after = new RecallEngine({ ...options, identityDigest: '这一代' });
+  try {
+    await before.rebuild();
+    before.close();
+
+    // The loaded bytes are fine and the source did not change — only the
+    // declared generation did. Answering from the old vectors here would be
+    // silent and permanent (new query vector vs old document vectors).
+    await assert.rejects(
+      () => after.query({ query: QUERY, limit: 1, project: 'alpha' }),
+      (error: unknown) => {
+        assert.ok(error instanceof RebuildNeededError);
+        assert.match(error.message, /model-mismatch/);
+        return true;
+      },
+    );
+
+    // The rebuild stamps the new generation, so the next query is answered.
+    await after.rebuild();
+    const payload = await after.query({ query: QUERY, limit: 1, project: 'alpha' });
+    assert.equal(payload.hits.length, 1);
+  } finally {
+    before.close();
+    after.close();
+    removeDir(dir);
+  }
+});
+
+test('筛选不影响任何条目的得分，也不改变相对顺序', async () => {  const f = await engineWith([
     { id: 1, cos: 0.99, type: 'A' },
     { id: 2, cos: 0.8, type: 'B' },
     { id: 3, cos: 0.6, type: 'A' },

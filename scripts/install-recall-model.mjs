@@ -7,12 +7,19 @@
  * explicit step. Nothing downloads silently at call time: if the directory is
  * incomplete, retrieval fails loudly with a message naming this script.
  *
- * Pruning is measured, not guessed: `prune_test.sh` in the spike showed the
- * CPU-WASM Node path opens exactly `package.json`, `ort.node.min.mjs`,
- * `ort-wasm-simd-threaded.mjs`, `ort-wasm-simd-threaded.wasm` plus the whole
- * `onnxruntime-common` package, and that removing any of the three executable
- * files makes an embed fail. The layout keeps `node_modules/` intact because
- * `ort.node.min.mjs` imports the bare specifier `onnxruntime-common`.
+ * The install **proves itself** at the end: it judges the result against the
+ * expected identity declared in the repository (`src/recall/model-expected.ts`,
+ * read back from `dist/`), and exits non-zero naming what disagrees instead of
+ * reporting success. The record it writes (`MANIFEST.json`) describes what was
+ * actually installed; it is never the basis of that judgement — otherwise a
+ * truncated download or a swapped source would certify itself.
+ *
+ * Pruning is measured, not guessed: the CPU-WASM Node path opens exactly
+ * `package.json`, `ort.node.min.mjs`, `ort-wasm-simd-threaded.mjs`,
+ * `ort-wasm-simd-threaded.wasm` plus the whole `onnxruntime-common` package, and
+ * removing any of the three executable files makes an embed fail. The layout
+ * keeps `node_modules/` intact because `ort.node.min.mjs` resolves the bare
+ * specifier `onnxruntime-common`.
  *
  * Usage:
  *   node scripts/install-recall-model.mjs --model-dir <dir> [--model-from <dir>] [--check]
@@ -20,27 +27,54 @@
  * `--model-from` accepts either a directory that directly holds the three model
  * files, or a HuggingFace/fastembed cache root containing
  * `models--Qdrant--bge-small-zh-v1.5/snapshots/<rev>/`.
+ *
+ * `--check` judges an existing installation against the declared identity and
+ * exits non-zero when it disagrees.
  */
 
 import { createHash } from 'node:crypto';
-import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-const HF_REPO = 'Qdrant/bge-small-zh-v1.5';
-/** Pinned revision: the one the spike measured against. */
-const HF_REVISION = '46fbe35fd4374a00fee7de77dfddaeb6dd6a2c59';
-const MODEL_FILES = ['model_optimized.onnx', 'tokenizer.json', 'tokenizer_config.json'];
-const ORT_PACKAGE = 'onnxruntime-web';
-const ORT_FILES = [
-  'package.json',
-  'dist/ort.node.min.mjs',
-  'dist/ort-wasm-simd-threaded.mjs',
-  'dist/ort-wasm-simd-threaded.wasm',
-];
-const ORT_COMMON = 'onnxruntime-common';
+// The expected identity is the repository's single source of truth for "which
+// bytes are the right bytes". It is imported from `dist/` (design D11): `dist/`
+// is not committed, so a fresh clone must build before installing — say so
+// plainly instead of failing with a module-resolution stack trace.
+const EXPECTED_MODULE = join(REPO, 'dist', 'recall', 'model-expected.js');
+if (!existsSync(EXPECTED_MODULE)) {
+  console.error(
+    'install-recall-model: 找不到 dist/。安装结果要按仓库里声明的期望身份自证，' +
+      '请先构建一次：`pnpm build`（或 `node_modules/.bin/tsc -p tsconfig.json`）。',
+  );
+  process.exit(2);
+}
+const { EXPECTED_IDENTITY, directoryFingerprint, verifyModelDir } = await import(
+  pathToFileURL(EXPECTED_MODULE).href
+);
+
+const HF_REPO = EXPECTED_IDENTITY.model.repo;
+const HF_REVISION = EXPECTED_IDENTITY.model.revision;
+const MODEL_FILES = [...EXPECTED_IDENTITY.model.files];
+const ORT_PACKAGE = EXPECTED_IDENTITY.runtime.package;
+const ORT_COMMON = EXPECTED_IDENTITY.group.relPath.split('/').pop();
+/** Package-relative paths of the runtime files, derived from the declaration. */
+const ORT_PREFIX = `node_modules/${ORT_PACKAGE}/`;
+const ORT_FILES = EXPECTED_IDENTITY.files
+  .filter((file) => file.relPath.startsWith(ORT_PREFIX))
+  .map((file) => file.relPath.slice(ORT_PREFIX.length));
 
 function arg(name, fallback) {
   const index = process.argv.indexOf(name);
@@ -88,7 +122,7 @@ async function downloadModelFiles(target) {
 }
 
 /**
- * Locate the `onnxruntime-common` package: `ort.node.min.mjs` imports it as a
+ * Locate the `onnxruntime-common` package: `ort.node.min.mjs` resolves it as a
  * bare specifier, so the deployed layout must keep it resolvable. npm hoists it
  * next to `onnxruntime-web`; pnpm keeps it under `.pnpm/`.
  */
@@ -124,39 +158,39 @@ function dirSize(path) {
     try {
       if (statSync(full).isFile()) total += statSync(full).size;
     } catch {
-      /* dangling link: reported as missing by report() */
+      /* dangling link: reported by the judgement as a mismatch */
     }
   }
   return total;
 }
 
-/** A part counts as present only when its bytes are actually here. */
-function present(path) {
-  try {
-    return statSync(path).isFile();
-  } catch {
-    return false;
-  }
+/** Render a judgement result: missing and mismatched are kept apart. */
+function describeProblems(problems) {
+  return problems.map((problem) => {
+    const label = problem.kind === 'missing' ? '缺失' : '不符';
+    const detail =
+      problem.kind === 'missing'
+        ? problem.expected
+        : `期望 ${problem.expected}；实际 ${problem.actual}`;
+    return `  - ${label} ${problem.relPath}（${problem.what}）：${detail}`;
+  });
 }
 
-function report(modelDir) {
-  const missing = [];
-  for (const file of MODEL_FILES) if (!present(join(modelDir, file))) missing.push(file);
-  for (const file of ORT_FILES) if (!present(join(modelDir, 'node_modules', ORT_PACKAGE, file))) missing.push(join(ORT_PACKAGE, file));
-  if (!existsSync(join(modelDir, 'node_modules', ORT_COMMON))) missing.push(ORT_COMMON);
-  return missing;
+function judge(modelDir) {
+  return verifyModelDir(modelDir);
 }
 
 async function main() {
   const modelDir = resolve(arg('--model-dir', defaultModelDir()));
   if (process.argv.includes('--check')) {
-    const missing = report(modelDir);
-    if (missing.length === 0) {
-      console.log(`install-recall-model: ok — ${modelDir} 完整（${(dirSize(modelDir) / 1e6).toFixed(1)} MB）`);
+    const problems = judge(modelDir);
+    if (problems.length === 0) {
+      console.log(`install-recall-model: ok — ${modelDir} 与期望身份一致（${(dirSize(modelDir) / 1e6).toFixed(1)} MB）`);
       return;
     }
-    console.error(`install-recall-model: ${modelDir} 缺少 ${missing.length} 项：`);
-    for (const item of missing) console.error(`  - ${item}`);
+    console.error(`install-recall-model: ${modelDir} 与期望身份不一致（${problems.length} 项）：`);
+    for (const line of describeProblems(problems)) console.error(line);
+    console.error('  期望身份在仓库内（src/recall/model-expected.ts），安装记录不参与判定。');
     process.exit(1);
   }
 
@@ -166,7 +200,10 @@ async function main() {
 
   console.log(`install-recall-model: 目标 ${modelDir}`);
 
-  // 1. pruned runtime
+  // 1. pruned runtime. The target `node_modules/` is cleared first: copying
+  //    merges and does not prune, so a leftover file from an older install
+  //    would make the layer-entry judgement fail forever — and re-running this
+  //    same command would not fix it (design D15).
   const ortSource = join(ortFrom, ORT_PACKAGE);
   if (!existsSync(ortSource)) {
     console.error(
@@ -174,22 +211,38 @@ async function main() {
     );
     process.exit(2);
   }
-  for (const file of ORT_FILES) {
-    const target = join(modelDir, 'node_modules', ORT_PACKAGE, file);
-    mkdirSync(dirname(target), { recursive: true });
-    copyFileSync(join(ortSource, file), target);
-  }
   const commonSource = locateOrtCommon(ortFrom);
   if (commonSource === undefined) {
     console.error(`install-recall-model: 找不到 ${ORT_COMMON}（从 ${ortFrom} 出发）`);
     process.exit(2);
   }
-  cpSync(commonSource, join(modelDir, 'node_modules', ORT_COMMON), { recursive: true });
+  try {
+    rmSync(join(modelDir, 'node_modules'), { recursive: true, force: true });
+    for (const file of ORT_FILES) {
+      const target = join(modelDir, 'node_modules', ORT_PACKAGE, file);
+      mkdirSync(dirname(target), { recursive: true });
+      copyFileSync(join(ortSource, file), target);
+    }
+    // `dereference` matters when the source root is itself a link: without it
+    // the installation would be a link pointing back into the source tree.
+    cpSync(commonSource, join(modelDir, 'node_modules', ORT_COMMON), {
+      recursive: true,
+      dereference: true,
+    });
+  } catch (error) {
+    // A half-written installation is not usable — the judgement below is what
+    // guarantees that, so there is no need to roll back. Report and stop.
+    console.error(
+      `install-recall-model: 复制运行时失败，安装未完成（${modelDir} 不可用，请重跑本命令）：${error.message}`,
+    );
+    process.exit(1);
+  }
   console.log(
     `  裁剪后的运行时：${ORT_FILES.length} 个文件 + ${ORT_COMMON}/（未复制 3 个其它 .wasm 变体与全部 .map/lib，约 128 MB）`,
   );
 
   // 2. model
+  let source;
   if (modelFrom !== undefined) {
     const located = locateModelFiles(resolve(modelFrom));
     if (located === undefined) {
@@ -202,36 +255,54 @@ async function main() {
     for (const file of MODEL_FILES) {
       copyFileSync(join(located, file), join(modelDir, file));
     }
+    source = { kind: 'local', dir: located };
     console.log(`  模型：从 ${located} 复制（跟随符号链接，落成真实文件）`);
   } else {
     console.log(`  模型：从 ${HF_REPO}@${HF_REVISION} 下载`);
     await downloadModelFiles(modelDir);
+    source = { kind: 'remote', repo: HF_REPO, revision: HF_REVISION };
   }
 
-  // 3. manifest
-  const files = [
-    ...MODEL_FILES.map((file) => join(modelDir, file)),
-    ...ORT_FILES.map((file) => join(modelDir, 'node_modules', ORT_PACKAGE, file)),
-  ];
+  // 3. self-proof, before anything claims success
+  const problems = judge(modelDir);
+  if (problems.length > 0) {
+    console.error(
+      `install-recall-model: 安装结果与期望身份不一致（${problems.length} 项），未安装成功：`,
+    );
+    for (const line of describeProblems(problems)) console.error(line);
+    process.exit(1);
+  }
+
+  // 4. record what was actually installed. Provenance only — the judgement
+  //    above never reads this file (design D0).
+  const files = EXPECTED_IDENTITY.files.map((file) => join(modelDir, ...file.relPath.split('/')));
+  const commonDir = join(modelDir, ...EXPECTED_IDENTITY.group.relPath.split('/'));
+  const installedGroup = directoryFingerprint(commonDir);
   const manifest = {
     installedAt: new Date().toISOString(),
-    huggingfaceRepo: modelFrom === undefined ? HF_REPO : undefined,
-    huggingfaceRevision: modelFrom === undefined ? HF_REVISION : undefined,
-    ortVersion: JSON.parse(readFileSync(join(modelDir, 'node_modules', ORT_PACKAGE, 'package.json'), 'utf8')).version,
+    source,
+    ortVersion: JSON.parse(
+      readFileSync(join(modelDir, 'node_modules', ORT_PACKAGE, 'package.json'), 'utf8'),
+    ).version,
     files: Object.fromEntries(
-      files.map((file) => [file.slice(modelDir.length + 1), { bytes: statSync(file).size, sha256: sha256(file) }]),
+      files.map((file) => [
+        file.slice(modelDir.length + 1),
+        { bytes: statSync(file).size, sha256: sha256(file) },
+      ]),
     ),
+    group: {
+      relPath: EXPECTED_IDENTITY.group.relPath,
+      algorithm: installedGroup.algorithm,
+      fingerprint: installedGroup.fingerprint,
+      files: installedGroup.files,
+      bytes: installedGroup.bytes,
+    },
     totalBytes: dirSize(modelDir),
   };
   writeFileSync(join(modelDir, 'MANIFEST.json'), `${JSON.stringify(manifest, null, 2)}\n`);
 
-  const missing = report(modelDir);
-  if (missing.length > 0) {
-    console.error(`install-recall-model: 安装后仍缺少：${missing.join(', ')}`);
-    process.exit(1);
-  }
   console.log(
-    `install-recall-model: 完成 — 合计 ${(manifest.totalBytes / 1e6).toFixed(1)} MB，` +
+    `install-recall-model: 完成并自证一致 — 合计 ${(manifest.totalBytes / 1e6).toFixed(1)} MB，` +
       `其中运行时 ${(dirSize(join(modelDir, 'node_modules')) / 1e6).toFixed(2)} MB`,
   );
   console.log(`  在插件配置里设置：searchModelDir: ${modelDir}`);

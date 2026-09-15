@@ -1,4 +1,5 @@
 import { IndexDb, inspectIndex, readSourceState, type EmbedderLike } from './index-db.js';
+import { expectedIdentityDigest } from './model-expected.js';
 import { excerpt, Scorer, type CoverageVariant } from './scoring.js';
 import type { RecallHit, RecallMetering, RecallPayload, RecallQuery } from './protocol.js';
 
@@ -37,6 +38,13 @@ export interface RecallEngineOptions {
   topK: number;
   coverage: CoverageVariant;
   dim?: number;
+  /**
+   * Identity of the declared model/runtime the vectors belong to. The writer
+   * (`sync`) and the checker (`inspectIndex`) both read it through this one
+   * option, so they cannot drift apart (design D10). Defaults to the
+   * repository's declaration; the worker passes it explicitly.
+   */
+  identityDigest?: string;
   /** Lazily created; the resident worker memoises the loaded model behind this. */
   embedder: () => Promise<EmbedderLike>;
   onEmbedLoad?: (loadMs: number) => void;
@@ -62,7 +70,12 @@ export class RecallEngine {
 
   /** Diagnostics: the state a caller would act on (no side effects). */
   inspect(): ReturnType<typeof inspectIndex> {
-    return inspectIndex(this.options.indexPath);
+    return inspectIndex(this.options.indexPath, this.identity);
+  }
+
+  /** The generation every write and every check is stamped with. */
+  private get identity(): string {
+    return this.options.identityDigest ?? expectedIdentityDigest();
   }
 
   close(): void {
@@ -77,7 +90,10 @@ export class RecallEngine {
     const state = readSourceState(this.options.dbPath);
     this.close();
     const index = IndexDb.recreate(this.options.indexPath);
-    const metering = await index.sync(state, await this.options.embedder(), { full: true });
+    const metering = await index.sync(state, await this.options.embedder(), {
+      full: true,
+      identityDigest: this.identity,
+    });
     this.index = index;
     this.scorer = undefined;
     return {
@@ -99,7 +115,7 @@ export class RecallEngine {
     const embedder = await this.options.embedder();
     const embedLoadMs = performance.now() - embedLoad0;
 
-    const metering = await index.sync(state, embedder, { hashMs });
+    const metering = await index.sync(state, embedder, { hashMs, identityDigest: this.identity });
     if (metering.mode !== 'noop' || this.scorer === undefined) {
       this.scorer = new Scorer(index, this.options.dim);
     }
@@ -205,7 +221,7 @@ export class RecallEngine {
 
   private ensureIndex(): IndexDb {
     if (this.index !== undefined) return this.index;
-    const inspection = inspectIndex(this.options.indexPath);
+    const inspection = inspectIndex(this.options.indexPath, this.identity);
     if (inspection.needsFullBuild) throw new RebuildNeededError(inspection.reason);
     const index = IndexDb.open(this.options.indexPath);
     if (!index.integrityOk()) {

@@ -4,7 +4,9 @@ context: |
   dsh-plugin-gentleai-engram — 非官方第三方桥插件，把 engram 持久记忆后端
   （Gentleman-Programming/engram，本机 1.20.0）接入 DeepSeek Harness（dsh）。
 
-  技术栈：TypeScript (ESM)、Node >= 22。运行时依赖按危害分层，不按"零第三方"
+  技术栈：TypeScript (ESM)、Node >= 24（`package.json` 的 engines；实测下限，
+  24.16.0 与 26.7.0 均端到端通过——检索需要无需 flag 的 node:sqlite）。运行时
+  依赖按危害分层，不按"零第三方"
   划线：宿主进程内绝不加载原生扩展/addon；host 提供的 @deepseek-ai/* 优先；
   纯 JS/WASM 依赖只在子进程内，且精确锁版本、有机制证明未被宿主入口加载。
   MCP 走 stdio，自实现最小 JSON-RPC 客户端（理由是拓扑：每个工作区一个长驻

@@ -1,10 +1,12 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { EmbedderLike } from '../dist/recall/index-db.js';
 import { documentText } from '../dist/recall/index-db.js';
+import { directoryFingerprint, EXPECTED_IDENTITY } from '../dist/recall/model-expected.js';
+import type { ExpectedIdentity } from '../dist/recall/model-expected.js';
 
 /**
  * Test-only helpers for the read layer.
@@ -182,6 +184,43 @@ export function fakeModelDir(root: string, options: ModelDirOptions = {}): strin
   writeFileSync(join(pkg, 'dist', 'ort-wasm-simd-threaded.mjs'), 'export default {};\n');
   writeFileSync(join(pkg, 'dist', 'ort-wasm-simd-threaded.wasm'), 'stub\n');
   return dir;
+}
+
+/**
+ * The expected identity that matches a fixture directory's *actual* bytes.
+ *
+ * `RecallProcessManager` judges each spawn against the repository's declared
+ * identity, and synthetic bytes can never equal the real digests (design D11).
+ * Tests therefore inject this instead of weakening the production default —
+ * `fakeModelDir` keeps producing its stub layout, and this reads it back.
+ *
+ * Paths come from the real declaration, so a fixture that misses or misspells a
+ * declared path fails the judgement loudly instead of silently shrinking the
+ * checked scope.
+ */
+export function expectedOf(dir: string): ExpectedIdentity {
+  const files = EXPECTED_IDENTITY.files.map((declared) => {
+    const data = readFileSync(join(dir, ...declared.relPath.split('/')));
+    return {
+      ...declared,
+      bytes: data.byteLength,
+      sha256: createHash('sha256').update(data).digest('hex'),
+    };
+  });
+  const groupDir = join(dir, ...EXPECTED_IDENTITY.group.relPath.split('/'));
+  const fingerprint = directoryFingerprint(groupDir);
+  return {
+    files,
+    group: {
+      ...EXPECTED_IDENTITY.group,
+      algorithm: fingerprint.algorithm,
+      fingerprint: fingerprint.fingerprint,
+      files: fingerprint.files,
+      bytes: fingerprint.bytes,
+    },
+    model: EXPECTED_IDENTITY.model,
+    runtime: EXPECTED_IDENTITY.runtime,
+  };
 }
 
 /** A tiny WordPiece vocabulary: enough to pin normalization, punctuation and truncation. */

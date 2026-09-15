@@ -3,8 +3,16 @@ import { Embedder } from './embed.js';
 import { RecallEngine, RebuildNeededError } from './engine.js';
 import { BacklogError, SourceMissingError, type EmbedderLike } from './index-db.js';
 import { ModelUnavailableError } from './model-dir.js';
+import { expectedIdentityDigest } from './model-expected.js';
 import type { CoverageVariant } from './scoring.js';
-import type { RecallErrorKind, RecallPayload, RecallQuery, WorkerFrame, WorkerRequest } from './protocol.js';
+import {
+  REBUILD_RUNTIME_MISSING_EXIT,
+  type RecallErrorKind,
+  type RecallPayload,
+  type RecallQuery,
+  type WorkerFrame,
+  type WorkerRequest,
+} from './protocol.js';
 
 /**
  * Resident recall worker: the ONLY process that loads the embedding runtime.
@@ -107,20 +115,35 @@ class Worker {
   }
 
   private async embedder(): Promise<EmbedderLike> {
-    this.embedderPromise ??= Embedder.create({
-      modelDir: this.config.modelDir,
-      threads: this.config.threads,
-    }).then((embedder) => {
-      this.log(
-        'info',
-        `嵌入运行时已加载：线程=${embedder.threads} 加载=${embedder.loadMs.toFixed(0)}ms 模型=${(
-          embedder.modelBytes /
-          1048576
-        ).toFixed(1)}MB`,
-      );
-      return embedder;
-    });
-    return this.embedderPromise;
+    let pending = this.embedderPromise;
+    if (pending === undefined) {
+      pending = Embedder.create({
+        modelDir: this.config.modelDir,
+        threads: this.config.threads,
+      }).then((embedder) => {
+        this.log(
+          'info',
+          `嵌入运行时已加载：线程=${embedder.threads} 加载=${embedder.loadMs.toFixed(0)}ms 模型=${(
+            embedder.modelBytes /
+            1048576
+          ).toFixed(1)}MB`,
+        );
+        return embedder;
+      });
+      this.embedderPromise = pending;
+    }
+    try {
+      return await pending;
+    } catch (error) {
+      // A failed load must not be remembered. `??=` alone caches the rejection
+      // for the life of the worker, so a cause that goes away leaves retrieval
+      // failing with the same stale error (design D6). Resetting is chosen over
+      // stopping the worker because the worker→host frame carries only
+      // `{kind, message}`: "internal, from the modelling stage" cannot be told
+      // apart on the wire, and distinguishing it would mean changing protocol.
+      if (this.embedderPromise === pending) this.embedderPromise = undefined;
+      throw error;
+    }
   }
 
   private getEngine(): RecallEngine {
@@ -130,6 +153,10 @@ class Worker {
       w: this.config.w,
       topK: this.config.topK,
       coverage: this.config.coverage,
+      // The worker is the process that loads the model, so it is where the index
+      // generation is stamped from — and it is stamped from the DECLARATION, not
+      // from whatever bytes happened to load (design D10).
+      identityDigest: expectedIdentityDigest(),
       embedder: () => this.embedder(),
     });
     return this.engine;
@@ -246,6 +273,7 @@ async function rebuild(): Promise<void> {
     w: config.w,
     topK: config.topK,
     coverage: config.coverage,
+    identityDigest: expectedIdentityDigest(),
     embedder: () =>
       Embedder.create({ modelDir: config.modelDir, threads: config.threads }).then((e) => {
         process.stdout.write(
@@ -268,6 +296,11 @@ if (isMain) {
   const run = mode === 'rebuild' ? rebuild() : serve();
   run.catch((error: unknown) => {
     process.stderr.write(`${errorText(error)}\n`);
-    process.exit(1);
+    // The host only sees an exit code here. A wrong model/runtime must not look
+    // like a generic build failure, or 「运行时或模型缺失」 would be reported as
+    // 「重建失败」 (design D7).
+    process.exit(
+      error instanceof ModelUnavailableError ? REBUILD_RUNTIME_MISSING_EXIT : 1,
+    );
   });
 }

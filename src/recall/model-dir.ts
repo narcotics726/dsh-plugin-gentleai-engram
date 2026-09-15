@@ -1,5 +1,11 @@
 import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import {
+  EXPECTED_IDENTITY,
+  verifyModelDir,
+  type ExpectedIdentity,
+  type IdentityProblem,
+} from './model-expected.js';
 
 /**
  * Layout of the explicitly installed model + pruned runtime directory
@@ -87,26 +93,80 @@ export function modelPartSizes(dir: string): Record<string, number> {
 }
 
 /**
- * Thrown when the installation is incomplete. Deliberately NOT the same failure
- * as a missing/corrupt derived index: the index is rebuilt, this is reported.
+ * One reason an installation is unusable.
+ *
+ * `missing` and `mismatch` are kept apart because the remedy differs (go
+ * install it, versus find out what replaced it) and because a message claiming
+ * 「缺少」 about a file that is present is simply false.
+ */
+export interface UnavailablePart {
+  kind: 'missing' | 'mismatch';
+  path: string;
+  what: string;
+  expected?: string;
+  actual?: string;
+}
+
+/**
+ * Thrown when the installation is not the one the repository declares.
+ * Deliberately NOT the same failure as a missing/corrupt derived index: the
+ * index is rebuilt, this is reported.
  */
 export class ModelUnavailableError extends Error {
   readonly kind = 'runtime-missing';
 
-  constructor(dir: string, missing: readonly MissingPart[]) {
-    const detail = missing.map((part) => `${part.what} (${part.path})`).join('; ');
+  constructor(dir: string, parts: readonly UnavailablePart[]) {
+    const lines = parts.map((part) =>
+      part.kind === 'missing'
+        ? `缺失 ${part.what}（${part.path}）`
+        : `不符 ${part.what}（${part.path}）：期望 ${part.expected ?? '?'}；实际 ${part.actual ?? '?'}`,
+    );
+    const header = parts.every((part) => part.kind === 'missing') ? '缺少：' : '不可用项：';
     super(
-      `engram-bridge: 检索所需的运行时或模型不完整，检索不可用。模型目录 ${dir} 缺少：${detail}。` +
+      `engram-bridge: 检索所需的运行时或模型不可用。模型目录 ${dir} ${header}${lines.join('；')}。` +
         '请运行 `node scripts/install-recall-model.mjs --model-dir ' +
         dir +
-        '` 完成安装（约 110 MB）。本插件不会自动下载。',
+        '` 装成仓库里声明的那一份（约 110 MB）。本插件不会自动下载，也不会自动修复。',
     );
     this.name = 'ModelUnavailableError';
   }
 }
 
+function missingPart(part: MissingPart): UnavailablePart {
+  return { kind: 'missing', path: part.path, what: part.what };
+}
+
+function problemPart(dir: string, problem: IdentityProblem): UnavailablePart {
+  return {
+    kind: problem.kind,
+    path: join(dir, ...problem.relPath.split('/')),
+    what: problem.what,
+    expected: problem.expected,
+    actual: problem.actual,
+  };
+}
+
 export function assertModelDir(dir: string): ModelPaths {
   const missing = missingModelParts(dir);
-  if (missing.length > 0) throw new ModelUnavailableError(dir, missing);
+  if (missing.length > 0) throw new ModelUnavailableError(dir, missing.map(missingPart));
   return modelPaths(dir);
+}
+
+/**
+ * Judge `dir` against the repository's declared expected identity and throw
+ * when it is not that installation.
+ *
+ * Called only by `process.ts`, immediately before each `spawn` — deliberately
+ * NOT from `assertModelDir`, whose callers run per retrieval (`embed.ts` builds
+ * the embedder once per worker) and would then hash ~110 MB on every call,
+ * which the spec forbids (design D1). On failure nothing is spawned and nothing
+ * is cached, so a later call re-judges and recovers (design D1, 「自愈」).
+ */
+export function assertExpectedIdentity(
+  dir: string,
+  expected: ExpectedIdentity = EXPECTED_IDENTITY,
+): void {
+  const problems = verifyModelDir(dir, expected);
+  if (problems.length === 0) return;
+  throw new ModelUnavailableError(dir, problems.map((problem) => problemPart(dir, problem)));
 }

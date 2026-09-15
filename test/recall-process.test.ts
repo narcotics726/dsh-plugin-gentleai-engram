@@ -3,7 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { RecallProcessManager, RecallUnavailableError } from '../dist/recall/process.js';
-import { fakeModelDir, removeDir, tempDir } from './recall-support.ts';
+import { expectedOf, fakeModelDir, removeDir, tempDir } from './recall-support.ts';
 
 /**
  * Resident-worker lifecycle.
@@ -22,9 +22,10 @@ interface Harness {
   manager: RecallProcessManager;
   flag: string;
   dir: string;
+  modelDir: string;
   logs: string[];
   notes(): string[];
-  pids(): number[];
+  pids: number[];
   cleanup(): Promise<void>;
 }
 
@@ -39,10 +40,11 @@ function harness(env: Record<string, string> = {}, options: Record<string, unkno
     process.env[key] = value;
   }
   process.env.STUB_FLAG = flag;
+  const modelDir = fakeModelDir(dir);
   const manager = new RecallProcessManager({
     dbPath: join(dir, 'source.db'),
     indexPath: join(dir, 'index.db'),
-    modelDir: fakeModelDir(dir),
+    modelDir,
     threads: 2,
     w: 0.2,
     topK: 50,
@@ -50,6 +52,9 @@ function harness(env: Record<string, string> = {}, options: Record<string, unkno
     idleMs: 60000,
     timeoutMs: 5000,
     workerPath: STUB,
+    // Synthetic bytes can never match the repository's declaration, so the
+    // judgement is fed the fixture's own identity (design D11).
+    expected: expectedOf(modelDir),
     log: {
       debug: (message: string) => {
         logs.push(message);
@@ -66,9 +71,10 @@ function harness(env: Record<string, string> = {}, options: Record<string, unkno
     manager,
     flag,
     dir,
+    modelDir,
     logs,
     pids,
-    notes: () => (existsSync(`${flag}.log`) ? readFileSync(`${flag}.log`, 'utf8').trim().split('\n') : []),
+    notes: () => readNotes(flag),
     cleanup: async () => {
       await manager.dispose();
       for (const [key, value] of Object.entries(previous)) {
@@ -80,8 +86,12 @@ function harness(env: Record<string, string> = {}, options: Record<string, unkno
   };
 }
 
-async function waitFor(check: () => boolean, timeoutMs = 5000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
+/** What the stub worker recorded for this run; empty means it never started. */
+function readNotes(flag: string): string[] {
+  return existsSync(`${flag}.log`) ? readFileSync(`${flag}.log`, 'utf8').trim().split('\n') : [];
+}
+
+async function waitFor(check: () => boolean, timeoutMs = 5000): Promise<void> {  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (check()) return;
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -214,16 +224,115 @@ test('重建失败时把失败原因报给调用方，而不是继续重试', as
   }
 });
 
+test('[2.6] 重建因模型原因失败时以独立退出码归一为 runtime-missing', async () => {
+  const h = harness({ STUB_REBUILD_NEEDED: '1', STUB_REBUILD_EXIT: '3' });
+  try {
+    await assert.rejects(
+      () => h.manager.query({ query: 'a', limit: 1, project: 'alpha' }),
+      (error: unknown) => {
+        assert.ok(error instanceof RecallUnavailableError);
+        assert.equal(
+          error.kind,
+          'runtime-missing',
+          '模型原因不得被报成「重建失败」',
+        );
+        return true;
+      },
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('[2.4] 判定失败：不起子进程、不产生无人处理的 rejection，原因消除后立即恢复', async () => {
+  const dir = tempDir('recall-judge-');
+  const modelDir = fakeModelDir(dir);
+  const flag = join(dir, 'stub');
+  const previousFlag = process.env.STUB_FLAG;
+  process.env.STUB_FLAG = flag;
+  const rejections: unknown[] = [];
+  const onRejection = (reason: unknown): void => {
+    rejections.push(reason);
+  };
+  process.on('unhandledRejection', onRejection);
+  const manager = new RecallProcessManager({
+    dbPath: join(dir, 's.db'),
+    indexPath: join(dir, 'i.db'),
+    modelDir,
+    threads: 1,
+    w: 0.2,
+    topK: 50,
+    coverage: 'field_cov',
+    idleMs: 60000,
+    timeoutMs: 5000,
+    workerPath: STUB,
+    expected: expectedOf(modelDir),
+    log: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
+  });
+  try {
+    const configPath = join(modelDir, 'tokenizer_config.json');
+    const original = readFileSync(configPath, 'utf8');
+    writeFileSync(configPath, `${original} `);
+
+    await assert.rejects(
+      () => manager.query({ query: 'a', limit: 1, project: 'alpha' }),
+      (error: unknown) => {
+        assert.ok(error instanceof RecallUnavailableError);
+        assert.equal(error.kind, 'runtime-missing');
+        assert.match(error.message, /tokenizer_config\.json/, '错误里须指名不符的文件');
+        return true;
+      },
+    );
+    assert.equal(manager.running(), false, '(b) 判定失败不得起子进程');
+    assert.deepEqual(await readNotes(flag), [], '(b) 子进程从未被 spawn');
+
+    // (c) 判定抛在 `start()` 的异步体之外，所以没有派生 promise 会吞掉它。
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(rejections, [], '(c) 不得出现无人处理的 rejection');
+
+    // (d) 判定失败不缓存任何东西：原因消除后紧接着的下一次调用就恢复。
+    writeFileSync(configPath, original);
+    await manager.query({ query: 'a', limit: 1, project: 'alpha' });
+    assert.equal(manager.running(), true, '(d) 恢复后应正常起子进程');
+  } finally {
+    process.off('unhandledRejection', onRejection);
+    if (previousFlag === undefined) delete process.env.STUB_FLAG;
+    else process.env.STUB_FLAG = previousFlag;
+    await manager.dispose();
+    removeDir(dir);
+  }
+});
+
+test('[2.7] 每次调用的检查只判存在性：改动内容不影响同一生命周期内的第二次检索', async () => {
+  const h = harness();
+  try {
+    await h.manager.query({ query: 'a', limit: 1, project: 'alpha' });
+    const pids = [...h.pids];
+
+    // Presence is untouched, content is not: the per-call guard must not care
+    // (it is the cheap check), and the running worker must not be re-judged or
+    // restarted — the bytes it holds in memory are the ones it was judged on.
+    writeFileSync(join(h.modelDir, 'tokenizer.json'), '{ this is not json');
+    assert.doesNotThrow(() => h.manager.assertInstalled(), '每调用一次的检查不得做摘要比对');
+    await h.manager.query({ query: 'a', limit: 1, project: 'alpha' });
+    assert.deepEqual(h.pids, pids, '第二次检索不得重新起进程');
+  } finally {
+    await h.cleanup();
+  }
+});
+
 test('子进程退出会让在途调用以明确原因失败，而不是挂住', async () => {
   const dir = tempDir('recall-crash-');
   const flag = join(dir, 'stub');
   const logged: string[] = [];
   process.env.STUB_FLAG = flag;
   writeFileSync(join(dir, 'suicide.mjs'), "process.exit(3);\n");
+  const modelDir = fakeModelDir(dir);
   const manager = new RecallProcessManager({
     dbPath: join(dir, 's.db'),
     indexPath: join(dir, 'i.db'),
-    modelDir: fakeModelDir(dir),
+    modelDir,
     threads: 1,
     w: 0.2,
     topK: 50,
@@ -231,6 +340,7 @@ test('子进程退出会让在途调用以明确原因失败，而不是挂住',
     idleMs: 1000,
     timeoutMs: 5000,
     workerPath: join(dir, 'suicide.mjs'),
+    expected: expectedOf(modelDir),
     log: { debug: () => {}, info: (m: string) => logged.push(m), warn: (m: string) => logged.push(m), error: (m: string) => logged.push(m) },
   });
   try {

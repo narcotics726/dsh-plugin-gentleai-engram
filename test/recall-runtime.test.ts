@@ -200,6 +200,9 @@ test('模型目录不完整时在调用点响亮失败，且不启动任何子�
         assert.equal(error.kind, 'runtime-missing');
         assert.match(error.message, /install-recall-model\.mjs/);
         assert.match(error.message, /不会自动下载/);
+        // 缺失与不符是两种情形：缺席的部件说「缺失」，存在的部件不能说「缺少」。
+        assert.match(error.message, /缺少/);
+        assert.doesNotMatch(error.message, /不符/);
         return true;
       },
     );

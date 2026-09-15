@@ -18,6 +18,7 @@ import { errorMessage, loggerFrom, type Logger } from './log.js';
 import { McpClient, type McpCallResult, type McpToolDeclaration } from './mcp-client.js';
 import { ConnectionPool } from './pool.js';
 import { RecallProcessManager, RecallUnavailableError } from './recall/process.js';
+import type { ExpectedIdentity } from './recall/model-expected.js';
 import type { RecallPayload, RecallQuery } from './recall/protocol.js';
 import { buildRecallToolDefinition, RECALL_INPUT_SCHEMA, RECALL_TOOL_NAME } from './recall-tool.js';
 import { guardEngramTools, isSubagentSession, shadowEngramTools, TOOL_PREFIX } from './subagent.js';
@@ -53,7 +54,21 @@ interface PluginContext {
   tools: { register(definition: ToolDefinition): () => void };
 }
 
-export function apply(ctx: PluginContext, config: EngramConfig): void {
+/**
+ * Injectable seams, for tests only.
+ *
+ * Cordis calls a plugin as `(ctx, config)` — there is no third argument on the
+ * production path — so nothing here can be reached from a user's configuration.
+ * That is the point: the read layer's fixtures are synthetic bytes, so tests
+ * must be able to inject a matching expected identity, while the judgement
+ * itself must stay "the repository's declaration", never "what the user said"
+ * (design D11). Hence a dependency, not a `Config` key.
+ */
+export interface PluginDeps {
+  expectedModel?: ExpectedIdentity;
+}
+
+export function apply(ctx: PluginContext, config: EngramConfig, deps: PluginDeps = {}): void {
   const log: Logger = loggerFrom(ctx);
   const shapeWarnings = new EventShapeWarnings((message) => log.warn(message));
   const envProject = typeof process.env.ENGRAM_PROJECT === 'string' ? process.env.ENGRAM_PROJECT : undefined;
@@ -117,6 +132,7 @@ export function apply(ctx: PluginContext, config: EngramConfig): void {
     idleMs: config.searchIdleMs ?? 600000,
     timeoutMs: config.searchTimeoutMs ?? 60000,
     log,
+    expected: deps.expectedModel,
   });
   ctx.effect(() => () => void recallManager.dispose(), 'engram-bridge.recall-process');
   ctx.effect(

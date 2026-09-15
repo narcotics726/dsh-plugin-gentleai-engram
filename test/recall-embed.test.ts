@@ -160,6 +160,8 @@ test('模型目录不完整时抛出可读的缺失清单', async () => {
       (error: unknown) => {
         assert.ok(error instanceof ModelUnavailableError);
         assert.match(error.message, /install-recall-model\.mjs/);
+        assert.match(error.message, /缺少/);
+        assert.doesNotMatch(error.message, /不符/, '全部缺失时不得说成「不符」');
         return true;
       },
     );

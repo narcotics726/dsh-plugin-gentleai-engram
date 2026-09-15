@@ -81,3 +81,14 @@ export type WorkerResponse =
 export type WorkerLog = { type: 'log'; level: 'debug' | 'info' | 'warn' | 'error'; message: string };
 export type WorkerReady = { type: 'ready'; pid: number; threads: number; modelDir: string };
 export type WorkerFrame = WorkerResponse | WorkerLog | WorkerReady;
+
+/**
+ * Exit code a `--rebuild` child uses when it could not build because the model
+ * or runtime is not the declared one.
+ *
+ * The host sees only an exit code from a one-shot child, and the spec keeps
+ * 「运行时或模型缺失」 apart from 「重建失败」. A dedicated code is how the host
+ * tells them apart without widening the wire protocol (design D7); every other
+ * failure keeps the generic code 1.
+ */
+export const REBUILD_RUNTIME_MISSING_EXIT = 3;

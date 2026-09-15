@@ -6,7 +6,8 @@ import { distinctTokens, tokenKey, tokenize, type Token } from './tokenizer.js';
  * Lexical + vector scoring over the derived index.
  *
  * PROVENANCE: port of the validated TypeScript scorer at
- *   ops/readlayer-eng/v7scorer/scorer.ts
+ *   v7scorer/scorer.ts (the spike tree was removed 2026-09-15; this repository
+ *   is now the only copy — the digest below still identifies it)
  *   sha256 7882367c4e53415f2bb9a7f30adea07cd7c58fc520352e3eac0e0c851d035a84
  * which reproduced read.py's ranking exactly (668/668 queries identical up to
  * depth 23; the single divergence at depth 24 is a float32 accumulation-order

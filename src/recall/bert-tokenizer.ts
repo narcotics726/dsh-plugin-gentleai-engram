@@ -2,7 +2,8 @@
  * WordPiece tokenizer for the embedding model (BAAI/bge-small-zh-v1.5).
  *
  * PROVENANCE: port of the validated TypeScript port at
- *   ops/readlayer-eng/wasmspike/bert_tokenizer.ts
+ *   wasmspike/bert_tokenizer.ts (the spike tree was removed 2026-09-15; this
+ *   repository is now the only copy — the digest below still identifies it)
  *   sha256 04422367acc6d906edb6cf069d87254b77f01230e86b23e54766ae85e1778b7e
  * where it was checked against fastembed's own tokenizer (1014/1014 probe
  * sequences identical). Faithful to the `tokenizers` BertTokenizer pipeline read

@@ -8,7 +8,8 @@ import { assertModelDir, type ModelPaths } from './model-dir.js';
  * text -> unit float32[512] via onnxruntime-web (pure WASM, CPU EP).
  *
  * PROVENANCE: port of the validated spike at
- *   ops/readlayer-eng/wasmspike/embed.ts
+ *   wasmspike/embed.ts (the spike tree was removed 2026-09-15; this repository
+ *   is now the only copy — the digest below still identifies it)
  *   sha256 947564f9218fbb336751b8385513d292f18c4e8b5cf4494a53bd5f91ecc7fa31
  * Replicates fastembed 0.8.0's `OnnxTextEmbedding` post-processing for
  * BAAI/bge-small-zh-v1.5, confirmed numerically in the spike:

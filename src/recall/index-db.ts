@@ -10,7 +10,8 @@ import { expectedIdentityDigest } from './model-expected.js';
  * full build.
  *
  * PROVENANCE: the update shape is a port of the verified prototype
- *   ops/readlayer-eng/liveindex/liveindex.py
+ *   liveindex/liveindex.py (the spike tree was removed 2026-09-15; this
+ *   repository is now the only copy — the digest below still identifies it)
  *   sha256 52b1e91419ead57f9e7eced3c4470c4e1cf262b0b75263815494fec2291df571
  * whose four properties were verified there and are NOT re-derived here:
  *   V1 the rows and the hash of exactly those rows are one snapshot (explicit

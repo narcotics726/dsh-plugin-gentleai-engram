@@ -62,7 +62,7 @@ worker 在首次 query 时把所需字节读进内存；此后改动盘上文件
 
 取法：`curl -x <proxy> -L https://huggingface.co/Qdrant/bge-small-zh-v1.5/resolve/46fbe35f…/<file>`（HF 会 307 跳到 `/api/resolve-cache/…`，`-L` 必须带）。
 
-**（2）本地缓存布局的独立佐证（离线，无需网络）。** fastembed 缓存位于仓库外的本机目录：`<cache-root>/models--Qdrant--bge-small-zh-v1.5/snapshots/46fbe35f…/`（定位方式：`find <cache-root> -type d -name 'models--Qdrant--bge-small-zh-v1.5'`；**在 `.tmp` 下，随时可能被清**，故不写机器绝对路径——仓库门禁也会拒绝）：
+**（2）本地缓存布局的独立佐证（离线，无需网络）。** fastembed 缓存位于仓库外的本机目录：`<cache-root>/models--Qdrant--bge-small-zh-v1.5/snapshots/46fbe35f…/`（定位方式：`find <cache-root> -type d -name 'models--Qdrant--bge-small-zh-v1.5'`；**在 `.tmp` 下，随时可能被清**，故不写机器绝对路径——仓库门禁也会拒绝）：**该缓存已于 2026-09-15 清理删除**，所以这条离线佐证现在需要先把模型重新下载到本机（`scripts/verify-model-expected.mjs` 找不到缓存时会明确报「未复核」，不静默通过）。
 
 - `blobs/1294ea4b6331115a…` 的**文件名就是** `model_optimized.onnx` 的 sha256；
 - `trees/46fbe35f….json` 显式记 `lfs_sha256: 1294ea4b…`（比第一版引用的物证更直接）；

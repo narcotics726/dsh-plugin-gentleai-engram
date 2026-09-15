@@ -2,11 +2,12 @@
  * Bigram tokenizer for the lexical half of the read layer.
  *
  * PROVENANCE: port of the validated TypeScript port at
- *   ops/readlayer-eng/tsbigram/tokenizer.ts
+ *   tsbigram/tokenizer.ts (the spike tree was removed 2026-09-15; this
+ *   repository is now the only copy — the digest below still identifies it)
  *   sha256 96ccd4b43fc624eb3df83ca5be45f17cb5417bbf244fa7a7e7afe293a9666267
- * itself a port of Python `ops/retrieval-eval/bigram/bigram_lib.py`
+ * itself a port of the spike's Python `bigram/bigram_lib.py`
  * (CJK_RANGES, is_cjk, tokenize, distinct_tokens). The lexical port was verified
- * row-equal against the Python reference (readlayer-eng REPORT.md V5: 346 docs /
+ * row-equal against the Python reference (spike REPORT.md V5: 346 docs /
  * 28181 terms / 79157 postings / 13 meta), so this file is a reproduction, not a
  * redesign. Two traps it handles explicitly:
  *

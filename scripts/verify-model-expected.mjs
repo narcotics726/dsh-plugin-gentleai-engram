@@ -26,10 +26,11 @@
  *                                          [--remote-proxy <url>]
  *
  * `--cache` points at a HuggingFace-style cache root (the one holding
- * `models--<repo>/snapshots/<rev>/`); without it the script looks at
- * `$ENGRAM_FASTEMBED_CACHE` and `$ENGRAM_FASTEMBED_CACHE`
- * and otherwise reports the model half as unverified — `find <cache-root> -type d
- * -name 'models--Qdrant--bge-small-zh-v1.5'` locates one.
+ * `models--<repo>/snapshots/<rev>/`), or `$ENGRAM_FASTEMBED_CACHE`; without one
+ * the model half is reported as unverified — `find <cache-root> -type d -name
+ * 'models--Qdrant--bge-small-zh-v1.5'` locates a cache if this machine has one.
+ * (The spike's own cache was removed 2026-09-15, so the
+ * offline half now needs a cache to be downloaded again.)
  *
  * Direct downloads do not work on a proxied machine (Node's `fetch` ignores
  * `HTTP(S)_PROXY`), which is why the remote check shells out to `curl -x`.
@@ -275,10 +276,6 @@ section('[3] 模型来源（本地缓存，离线）');
 function locateCache() {
   const explicit = arg('--cache') ?? process.env.ENGRAM_FASTEMBED_CACHE;
   if (explicit !== undefined && explicit !== '') return explicit;
-  const cache = process.env.ENGRAM_FASTEMBED_CACHE;
-  if (cache !== undefined && cache !== '') {
-    return cache;
-  }
   return undefined;
 }
 const cache = locateCache();

@@ -10,8 +10,20 @@ scripts/probe/tmp/
 .credentials.yaml
 .pnpm-store/
 
+# Scratch space for local runs (TMPDIR and one-off helper files live here).
+.tmp/
+
 # Probe run artifacts: local evidence, never committed (see scripts/probe/README.md).
 scripts/probe/out/
+
+# Derived read-layer state. `searchIndexDir` may be pointed inside the repo, and
+# that directory holds both the corpus index (index.db plus its SQLite sidecars)
+# and the runtime lock file (index.db.lock, recording pid/host/heartbeat): local
+# derived state, never committed.
+index.db
+index.db-wal
+index.db-shm
+index.db.lock
 
 # Review artifacts produced by interactive agent review workflows:
 # <phase>.review.md. They record the operator's own answers, verdicts and

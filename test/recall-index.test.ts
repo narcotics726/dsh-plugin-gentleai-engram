@@ -4,7 +4,8 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
-import { ALGO_VERSION, IDENTITY_META_KEY, IndexDb, MAX_INLINE_SYNC_DOCS, SCORING, SOURCE_HASH_FORMULA, contentSha, inspectIndex, readSourceState } from '../dist/recall/index-db.js';
+import { ALGO_VERSION, EMBED_SLICE_DOCS, IDENTITY_META_KEY, IndexDb, SCORING, SOURCE_HASH_FORMULA, contentSha, inspectIndex, readSourceState } from '../dist/recall/index-db.js';
+import { MAX_BATCH } from '../dist/recall/embed.js';
 import { EXPECTED_IDENTITY, expectedIdentityDigest } from '../dist/recall/model-expected.js';
 import { Scorer } from '../dist/recall/scoring.js';
 import { dot, expectedSourceHash, fakeEmbedder, removeDir, tempDir, writeSource, type SourceRow } from './recall-support.ts';
@@ -433,7 +434,7 @@ test('回归：四个打分常量只在建索引处声明一次，打分器里�
   assert.deepEqual(declaring, ['src/recall/index-db.ts'], '打分常量的数值只能在建索引处声明');
 });
 
-test('增量积压超过单次上限时以明确原因拒绝', async () => {
+test('超过 maxDocs 时：不嵌入、不写入、不留标记，返回 deferred 与待处理条数', async () => {
   const dir = tempDir();
   try {
     const dbPath = join(dir, 'source.db');
@@ -441,19 +442,153 @@ test('增量积压超过单次上限时以明确原因拒绝', async () => {
     writeSource(dbPath, [{ id: 1, title: 'a', content: 'only one.', project: 'alpha' }]);
     const index = IndexDb.recreate(indexPath);
     await index.sync(readSourceState(dbPath), fakeEmbedder({ dim: DIM }), { full: true });
+    const before = snapshot(indexPath);
 
-    const many: SourceRow[] = Array.from({ length: MAX_INLINE_SYNC_DOCS + 2 }, (_, i) => ({
-      id: 100 + i,
+    const many: SourceRow[] = [
+      { id: 1, title: 'a', content: 'only one.', project: 'alpha' },
+      { id: 100, title: 't0', content: 'c0', project: 'alpha' },
+      { id: 101, title: 't1', content: 'c1', project: 'alpha' },
+      { id: 102, title: 't2', content: 'c2', project: 'alpha' },
+      { id: 103, title: 't3', content: 'c3', project: 'alpha' },
+    ];
+    writeSource(dbPath, many);
+
+    let embedCalls = 0;
+    const metering = await index.sync(readSourceState(dbPath), fakeEmbedder({ dim: DIM, onEmbed: () => embedCalls++ }), {
+      maxDocs: 3,
+    });
+    assert.equal(metering.mode, 'deferred');
+    assert.equal(metering.pendingDocs, 4, '待处理条数 = 本次要动的条数（4 条新增）');
+    assert.equal(metering.embedDocs, 0);
+    assert.equal(embedCalls, 0, '超限时一次嵌入都不做');
+    assert.deepEqual(snapshot(indexPath), before, '超限时索引逐行不变');
+    assert.equal(index.updatePrefixPresent(), false, '不得留下进行中标记');
+
+    // In-cap work still goes through, so the deferral is about the cap only.
+    const done = await index.sync(readSourceState(dbPath), fakeEmbedder({ dim: DIM }), { maxDocs: 4 });
+    assert.equal(done.mode, 'incremental');
+    assert.equal(done.embedDocs, 4);
+    index.close();
+  } finally {
+    removeDir(dir);
+  }
+});
+
+test('maxDocs 对 full 与增量是同一个判定（full 也要能 defer 且不破坏索引）', async () => {
+  const dir = tempDir();
+  try {
+    const dbPath = join(dir, 'source.db');
+    const indexPath = indexOf(dir);
+    writeSource(dbPath, CORPUS.slice(0, 3));
+    const index = IndexDb.recreate(indexPath);
+    await index.sync(readSourceState(dbPath), fakeEmbedder({ dim: DIM }), { full: true });
+    const stored = index.storedHash();
+    const before = snapshot(indexPath);
+
+    const deferred = await index.sync(readSourceState(dbPath), fakeEmbedder({ dim: DIM }), {
+      full: true,
+      maxDocs: 2,
+    });
+    assert.equal(deferred.mode, 'deferred');
+    assert.equal(deferred.pendingDocs, 3);
+    assert.equal(index.storedHash(), stored, 'defer 不得把 source_hash 清空或改写');
+    assert.deepEqual(snapshot(indexPath), before);
+    index.close();
+  } finally {
+    removeDir(dir);
+  }
+});
+
+test('写事务内的复核：锁被接管或期间有人提交过，整次写入回滚且报 busy', async () => {
+  const dir = tempDir();
+  try {
+    const dbPath = join(dir, 'source.db');
+    const indexPath = indexOf(dir);
+    writeSource(dbPath, CORPUS.slice(0, 3));
+    const index = IndexDb.recreate(indexPath);
+    await index.sync(readSourceState(dbPath), fakeEmbedder({ dim: DIM }), { full: true });
+    const before = snapshot(indexPath);
+
+    writeSource(dbPath, [
+      { ...CORPUS[0]!, content: '改写后的内容。' },
+      CORPUS[1]!,
+      CORPUS[2]!,
+    ]);
+
+    // (a) the lock was taken away: assertStillHeld throws inside the transaction
+    await assert.rejects(
+      () =>
+        index.sync(readSourceState(dbPath), fakeEmbedder({ dim: DIM }), {
+          assertStillHeld: () => {
+            throw Object.assign(new Error('busy'), { kind: 'busy' });
+          },
+        }),
+      (error: { kind?: string }) => error.kind === 'busy',
+    );
+    assert.deepEqual(snapshot(indexPath), before, '被接管后整次写入必须回滚');
+
+    // (b) somebody else committed during the embedding gap: the stored hash no
+    // longer matches what we read under the lock, so applying our diff would
+    // move the index backwards.
+    await assert.rejects(
+      () =>
+        index.sync(readSourceState(dbPath), fakeEmbedder({ dim: DIM }), {
+          expectedStoredHash: 'a-different-hash',
+        }),
+      (error: { kind?: string }) => error.kind === 'busy',
+    );
+    assert.deepEqual(snapshot(indexPath), before, '快照过期后整次写入必须回滚');
+    index.close();
+  } finally {
+    removeDir(dir);
+  }
+});
+
+test('嵌入按批切片：批大小不超过嵌入器的硬上限，且批间给出进度回调', async () => {
+  assert.ok(
+    EMBED_SLICE_DOCS <= MAX_BATCH,
+    `切片 ${EMBED_SLICE_DOCS} 必须 ≤ 嵌入器硬上限 ${MAX_BATCH}，否则心跳之间会出现超长无进展段`,
+  );
+  const dir = tempDir();
+  try {
+    const dbPath = join(dir, 'source.db');
+    const indexPath = indexOf(dir);
+    const rows: SourceRow[] = Array.from({ length: EMBED_SLICE_DOCS * 2 + 1 }, (_, i) => ({
+      id: i + 1,
       title: `t${i}`,
       content: `c${i}`,
       project: 'alpha',
     }));
-    writeSource(dbPath, many);
-    await assert.rejects(
-      () => index.sync(readSourceState(dbPath), fakeEmbedder({ dim: DIM })),
-      (error: { kind?: string }) => error.kind === 'backlog',
-    );
+    writeSource(dbPath, rows);
+    const index = IndexDb.recreate(indexPath);
+    const batches: number[] = [];
+    let progress = 0;
+    await index.sync(readSourceState(dbPath), fakeEmbedder({ dim: DIM, onEmbed: (texts) => batches.push(texts.length) }), {
+      full: true,
+      onProgress: () => progress++,
+    });
+    assert.deepEqual(batches, [EMBED_SLICE_DOCS, EMBED_SLICE_DOCS, 1], '按切片调用嵌入器');
+    assert.equal(progress, batches.length + 1, '每片之后一次心跳，进入写事务之前再来一次');
     index.close();
+  } finally {
+    removeDir(dir);
+  }
+});
+
+test('写入侧的 SQLite 等待是按路径给的（常驻要快速失败，不能吃满自己的预算）', () => {
+  const dir = tempDir();
+  try {
+    const indexPath = indexOf(dir);
+    const fast = IndexDb.open(indexPath, { busyTimeoutMs: 3000 });
+    const row = fast.handle.prepare('PRAGMA busy_timeout').get() as { timeout?: number };
+    assert.equal(Number(row.timeout), 3000);
+    fast.close();
+    const slow = IndexDb.open(indexPath, { busyTimeoutMs: 60000 });
+    assert.equal(
+      Number((slow.handle.prepare('PRAGMA busy_timeout').get() as { timeout?: number }).timeout),
+      60000,
+    );
+    slow.close();
   } finally {
     removeDir(dir);
   }

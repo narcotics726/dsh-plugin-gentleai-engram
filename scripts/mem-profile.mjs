@@ -75,6 +75,14 @@ const threads = num('--threads', 1);
 const queries = num('--queries', 500);
 const intervalMs = num('--interval-ms', 100);
 const rebuildThreads = num('--rebuild-threads', Math.max(1, Math.min(16, Number(process.env.MEM_PROFILE_REBUILD_THREADS ?? 16))));
+/** Sampling cadence for the one-shot peak (a 10-min run tolerates a coarse one). */
+const sampleMs = num('--sample-ms', 250);
+/**
+ * The resident's production cap (design D4: 1300 ms·thread/doc, threads clamped
+ * to the measured range). The resident must stay bounded — only the diagnostic
+ * one-shot below is allowed to be `unlimited`.
+ */
+const residentMaxDocs = Math.max(0, Math.floor((60_000 * Math.min(16, threads)) / 1300));
 const query = arg('--query', '检索层内存复测 常驻 worker 稳态');
 const project = arg('--project', undefined);
 
@@ -86,7 +94,7 @@ for (const [label, path] of [['模型目录', modelDir], ['源库', dbPath]]) {
 }
 mkdirSync(dirname(indexPath), { recursive: true });
 
-const env = (extraThreads) => ({
+const env = (extraThreads, maxDocs) => ({
   ...process.env,
   ENGRAM_BRIDGE_DB_PATH: dbPath,
   ENGRAM_BRIDGE_INDEX_PATH: indexPath,
@@ -95,6 +103,12 @@ const env = (extraThreads) => ({
   ENGRAM_BRIDGE_W: '0.2',
   ENGRAM_BRIDGE_TOP_K: '50',
   ENGRAM_BRIDGE_COVERAGE: 'field_cov',
+  // Diagnostics override the cap: this tool has to initialize an index whose
+  // corpus may exceed what one production call may do, and it must never be
+  // refused for that (design D2's `unlimited` is the explicit value).
+  ENGRAM_BRIDGE_MAX_DOCS: maxDocs,
+  ENGRAM_BRIDGE_LOCK_WAIT_MS: '30000',
+  ENGRAM_BRIDGE_BUSY_TIMEOUT_MS: '60000',
 });
 
 /** Resident memory in MB (KB on Linux and macOS alike). */
@@ -104,6 +118,31 @@ function rssMb(pid) {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Sample a short-lived one-shot child's RSS until it exits, and report the
+ * peak. This is the number the resident judgement cannot cover: the transient
+ * high-thread process (`design.md` D4/D7, and the one open item in its Risks).
+ */
+async function sampleOneShot(mode, threads) {
+  const child = spawn(process.execPath, [WORKER, mode], {
+    env: env(threads, 'unlimited'),
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,
+  });
+  const samples = [];
+  let alive = true;
+  child.on('exit', () => {
+    alive = false;
+  });
+  while (alive && child.pid !== undefined) {
+    const mb = rssMb(child.pid);
+    if (mb !== undefined) samples.push(mb);
+    await sleep(sampleMs);
+  }
+  const code = await new Promise((done) => child.on('exit', (c) => done(c ?? 1)));
+  return { code, peak: samples.length > 0 ? Math.max(...samples) : undefined, samples: samples.length };
 }
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -119,7 +158,7 @@ if (inspection.needsFullBuild) {
   console.log(`mem-profile: 索引需要重建（${inspection.reason}），先用 ${rebuildThreads} 线程跑一次全量`);
   const t0 = Date.now();
   const code = await new Promise((done) => {
-    const child = spawn(process.execPath, [WORKER, '--rebuild'], { env: env(rebuildThreads), stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [WORKER, '--rebuild'], { env: env(rebuildThreads, 'unlimited'), stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.on('data', (chunk) => process.stdout.write(`  ${chunk}`));
     child.stderr.on('data', (chunk) => process.stderr.write(`  ${chunk}`));
     child.on('exit', (exitCode) => done(exitCode ?? 1));
@@ -128,13 +167,25 @@ if (inspection.needsFullBuild) {
     console.error(`mem-profile: 全量重建失败（exit=${code}）`);
     process.exit(2);
   }
-  console.log(`  重建完成 ${((Date.now() - t0) / 1000).toFixed(1)}s（这一段是 16 线程的峰值，不计入下面的稳态）`);
+  console.log(`  重建完成 ${((Date.now() - t0) / 1000).toFixed(1)}s（这一段是 ${rebuildThreads} 线程的峰值，不计入下面的稳态）`);
+}
+
+// ---------------------------------------------------- one-shot transient peak
+
+if (process.argv.includes('--oneshot-peak')) {
+  console.log(`mem-profile: 量一次性进程的瞬时峰值（${rebuildThreads} 线程，--sync，上限 unlimited）`);
+  const { code, peak, samples } = await sampleOneShot('--sync', rebuildThreads);
+  console.log(
+    `  退出码 ${code}，采样 ${samples} 次，峰值 ${peak === undefined ? '—' : `${peak.toFixed(0)} MB`}`,
+  );
+  console.log('  这条读数管的是常驻判据管不到的那一段（短命高线程进程），见 design.md 的 Risks。');
+  process.exit(code === 0 ? 0 : 2);
 }
 
 // ------------------------------------------------------------- resident worker
 
 const samples = [];
-const child = spawn(process.execPath, [WORKER], { env: env(threads), stdio: ['pipe', 'pipe', 'pipe'], detached: true });
+const child = spawn(process.execPath, [WORKER], { env: env(threads, String(residentMaxDocs)), stdio: ['pipe', 'pipe', 'pipe'], detached: true });
 let pid;
 let readyThreads = threads;
 let stderr = '';

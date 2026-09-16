@@ -36,16 +36,19 @@ interface FakeHost {
   ctx: never;
   handlers: Map<string, (...args: unknown[]) => unknown>;
   registrations: Map<string, { parameters?: unknown; execute?: unknown; output?: unknown; timeoutMs?: number }>;
+  /** Definitions the plugin registered through the host's command registry. */
+  commands: Array<{ name: string; description: string; recordInput?: boolean }>;
   logs: HostLog;
   disposeAll(): void;
 }
 
-function fakeHost(): FakeHost {
+function fakeHost(options: { withCommands?: boolean } = {}): FakeHost {
   const handlers = new Map<string, (...args: unknown[]) => unknown>();
   const registrations = new Map<string, { parameters?: unknown; execute?: unknown; output?: unknown; timeoutMs?: number }>();
+  const commands: Array<{ name: string; description: string; recordInput?: boolean }> = [];
   const logs: HostLog = { info: [], warn: [], error: [] };
   const disposers: Array<() => void> = [];
-  const ctx = {
+  const ctx: Record<string, unknown> = {
     logger: {
       debug(): void {},
       info: (message: string) => logs.info.push(message),
@@ -71,10 +74,28 @@ function fakeHost(): FakeHost {
       },
     },
   };
+  if (options.withCommands === true) {
+    // Optional service injection, as cordis does it: the child context only
+    // exists when the service does.
+    ctx.inject = (deps: readonly string[], callback: (ctx: unknown) => void): void => {
+      assert.deepEqual([...deps], ['commands']);
+      const child: Record<string, unknown> = {
+        ...ctx,
+        commands: {
+          register(definition: { name: string; description: string; recordInput?: boolean }): () => void {
+            commands.push(definition);
+            return () => {};
+          },
+        },
+      };
+      callback(child);
+    };
+  }
   return {
     ctx: ctx as never,
     handlers,
     registrations,
+    commands,
     logs,
     disposeAll(): void {
       for (const dispose of [...disposers].reverse()) dispose();
@@ -102,6 +123,7 @@ async function rig(
   options: {
     injectSessionProject?: boolean;
     searchEnabled?: boolean;
+    withCommands?: boolean;
     rows?: Parameters<typeof writeSource>[1];
   } = {},
 ): Promise<Rig> {
@@ -120,7 +142,7 @@ async function rig(
       { id: 2, title: 'other', content: 'another project row', type: 'discovery', project: 'beta' },
     ],
   );
-  const host = fakeHost();
+  const host = fakeHost({ withCommands: options.withCommands });
   const config = {
     command: process.execPath,
     args: [stubPath],
@@ -198,12 +220,23 @@ test('wiring: 读层工具与 engram 工具面一起注册，注册面 = 声明�
     assert.ok(!names.includes('mcp__engram__mem_search'), '被取代的检索工具不得注册');
     assert.ok(!names.includes('mcp__engram__mem_capture_passive'));
     assert.ok(!names.includes('mcp__engram__mem_save_prompt'));
-    // 绝对计数 20 是**真实** engram 工具面的性质，由活宿主验收（tasks 8.1）判定；
-    // 这里断言的是关系：注册面 = 声明面 − 刻意不注册 + 1 个插件自有工具。
+    // 绝对计数由**真实** engram 工具面的活宿主验收（tasks 8.1）判定；这里断言的是关系：
+    // 注册面 = 声明面 − 刻意不注册 + 2 个插件自有工具（检索 + 显式入口）。
     assert.equal(
       names.filter((name) => name.startsWith('mcp__engram__')).length,
-      5,
-      `本 stub 声明 7 个工具、刻意不注册 3 个，加上自有工具应为 5，实际 ${names.length}：${names.join(',')}`,
+      6,
+      `本 stub 声明 7 个工具、刻意不注册 3 个，加上两个自有工具应为 6，实际 ${names.length}：${names.join(',')}`,
+    );
+    assert.ok(
+      names.includes('mcp__engram__mem_bridge_recall_sync'),
+      '显式入口必须与检索工具一起注册',
+    );
+    const syncDefinition = r.host.registrations.get('mcp__engram__mem_bridge_recall_sync')!;
+    assert.equal(syncDefinition.timeoutMs, 600_000, '显式入口的静态超时就是它的容量来源');
+    assert.deepEqual(
+      (syncDefinition.parameters as { required?: string[] }).required,
+      [],
+      '显式入口没有参数：调用方唯一的决定是要不要等',
     );
     // 自己的规范化值 + 自己的 output.schema，而不是伪装成 MCP 结果。
     const definition = r.host.registrations.get('mcp__engram__mem_bridge_recall')!;
@@ -313,6 +346,10 @@ test('wiring: 子 agent 的可见性限制覆盖插件自有工具', async () =>
     await r.host.handlers.get('agent/created')?.({ agent: subagent });
     const denied = restricts.flat();
     assert.ok(denied.includes('mcp__engram__mem_bridge_recall'), '子 agent 的拒绝清单应包含自有检索工具');
+    assert.ok(
+      denied.includes('mcp__engram__mem_bridge_recall_sync'),
+      '子 agent 的拒绝清单也应包含显式入口',
+    );
     assert.ok(guards.length > 0);
     assert.match(
       guards[0]!({ name: 'mcp__engram__mem_bridge_recall' }) ?? '',
@@ -323,8 +360,35 @@ test('wiring: 子 agent 的可见性限制覆盖插件自有工具', async () =>
   }
 });
 
-test('wiring: 注入判定只看工具自己声明的参数', () => {
-  assert.deepEqual(
+test('[6.3] 操作者命令：在 apply 时就注册（独立于工具声明），元数据可被宿主校验', async () => {
+  const r = await rig({ withCommands: true });
+  try {
+    // No session has run, so the engram tool surface may not exist — the repair
+    // path must already be there regardless.
+    assert.equal(r.host.commands.length, 1, '命令必须在 apply 时注册，不能等工具面');
+    const definition = r.host.commands[0]!;
+    assert.equal(definition.name, 'engram-sync');
+    assert.equal(definition.recordInput, false);
+    assert.ok(definition.description.length > 0);
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test('[6.3] 宿主没有 commands 服务：桥照常加载，只是没有这条命令', async () => {
+  const r = await rig();
+  try {
+    await startSession(r.host, 'stub-recall');
+    assert.equal(r.host.commands.length, 0, '没有服务就没有命令');
+    assert.ok(r.host.registrations.has('mcp__engram__mem_bridge_recall'), '其余能力不受影响');
+    assert.ok(r.host.registrations.has('mcp__engram__mem_bridge_recall_sync'));
+    assert.deepEqual(r.host.logs.error, []);
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test('wiring: 注入判定只看工具自己声明的参数', () => {  assert.deepEqual(
     injectionForTool({ name: 'mem_bridge_recall', inputSchema: { type: 'object', properties: { query: {}, project: {} } } as never }),
     { project: true, sessionId: false, directory: false },
   );

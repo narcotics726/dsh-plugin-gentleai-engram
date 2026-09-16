@@ -261,7 +261,13 @@ export interface EmbedderLike {
   embed(texts: readonly string[]): Promise<Float32Array[]>;
 }
 
-export type SyncMode = 'noop' | 'hash-only' | 'incremental' | 'full';
+export type SyncMode = 'noop' | 'hash-only' | 'incremental' | 'full' | 'deferred';
+
+/** How much work a sync would do: what it is, and how many documents it touches. */
+export interface SyncPlan {
+  mode: SyncMode;
+  touched: number;
+}
 
 export interface SyncMetering {
   /** Whether the source changed since the last successful update. */
@@ -276,6 +282,8 @@ export interface SyncMetering {
   syncMs: number;
   embedDocs: number;
   mode: SyncMode;
+  /** Documents this call declined to touch, present when `mode === 'deferred'`. */
+  pendingDocs?: number;
   docCount: number;
   indexBytes: number;
 }
@@ -292,28 +300,42 @@ export interface SyncOptions {
    * apart (design D10).
    */
   identityDigest?: string;
+  /**
+   * How many documents this call may touch (changed + removed). Absent means
+   * unlimited — a mechanism default that only test fixtures and the operator
+   * request may use; every other product path passes a real cap (design D2).
+   * Over the cap nothing is embedded and nothing is written: the call returns
+   * `mode: 'deferred'` with `pendingDocs`, and the caller decides.
+   */
+  maxDocs?: number;
+  /**
+   * Called between embedding slices. The lock holder supplies a heartbeat here
+   * (`design.md` D6), so a long run keeps proving progress.
+   */
+  onProgress?: () => void;
+  /**
+   * Called right after the write transaction opens. The lock holder re-checks
+   * that it still owns the lock here: the embedding gap is long, so a check
+   * "before the transaction" proves nothing (design D6).
+   */
+  assertStillHeld?: () => void;
+  /**
+   * The index's own `source_hash` as read under the lock. If another writer
+   * committed during the embedding gap this no longer matches, and the write
+   * must be abandoned rather than regress the index.
+   */
+  expectedStoredHash?: string;
 }
+
+/** Per-call write-lock wait; a resident call must fail fast, not eat its budget. */
+export const DEFAULT_BUSY_TIMEOUT_MS = 60_000;
 
 /**
- * Cap on how many documents one call may sync inline. Beyond it the call is
- * refused with an explicit reason instead of syncing for an unbounded time
- * inside a turn that is waiting for the result. The threshold is provisional: it
- * is listed as an Open Question in the change and needs a real backlog
- * measurement before it is treated as tuned.
+ * Documents per embedding slice. Mirrors the embedder's own hard batch ceiling
+ * (`embed.ts` MAX_BATCH = 32) and exists so the writer can heartbeat between
+ * slices; a test asserts the two constants stay in step (`design.md` D6).
  */
-export const MAX_INLINE_SYNC_DOCS = 500;
-
-export class BacklogError extends Error {
-  readonly kind = 'backlog';
-  constructor(pending: number, indexPath: string) {
-    super(
-      `engram-bridge: 索引落后较多（待同步 ${pending} 条 > 单次调用上限 ${MAX_INLINE_SYNC_DOCS}），` +
-        '为避免在一个正在等结果的回合里无限期同步，本次检索已拒绝。' +
-        `删除索引目录里的 ${indexPath} 后下一次检索会重建（或改用更小的批量）。`,
-    );
-    this.name = 'BacklogError';
-  }
-}
+export const EMBED_SLICE_DOCS = 32;
 
 interface PostingEntry {
   token: string;
@@ -383,16 +405,26 @@ export class IndexDb {
   }
 
   /** Open an existing index, or create an empty one. */
-  static open(indexPath: string): IndexDb {
+  static open(indexPath: string, options: { busyTimeoutMs?: number } = {}): IndexDb {
     mkdirSync(dirname(indexPath), { recursive: true });
     const db = new DatabaseSync(indexPath);
     db.exec('PRAGMA journal_mode=WAL');
     db.exec('PRAGMA synchronous=NORMAL');
+    // A resident call's whole budget is ~60 s, so waiting 60 s on SQLite's write
+    // lock would be killed by the host with nothing committed (zero progress).
+    // Callers pass a per-path value (design D6).
+    db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(options.busyTimeoutMs ?? DEFAULT_BUSY_TIMEOUT_MS))}`);
     db.exec(SCHEMA.replace(/CREATE TABLE /g, 'CREATE TABLE IF NOT EXISTS '));
     return new IndexDb(indexPath, db);
   }
 
-  /** Delete and recreate: used before a full build and to recover a corrupt file. */
+  /**
+   * Delete and recreate: only for an index that cannot be read at all (missing
+   * or corrupt), never for a routine rebuild — a routine rebuild goes through
+   * `sync({ full: true })`, which clears and refills inside ONE transaction.
+   * The lock file is deliberately NOT in this list: the holder recreates while
+   * holding it, so deleting it would drop our own lock (design D5/D6).
+   */
   static recreate(indexPath: string): IndexDb {
     for (const suffix of ['', '-wal', '-shm']) {
       try {
@@ -450,8 +482,13 @@ export class IndexDb {
 
   /**
    * Bring the index to `state`, touching only what changed. `mode: 'full'` wipes
-   * and rebuilds. Both paths run inside one SQLite transaction, which is the
-   * atomicity unit: a kill mid-update rolls the whole thing back.
+   * and refills inside ONE transaction. Both paths run inside that transaction,
+   * which is the atomicity unit: a kill mid-update rolls the whole thing back.
+   *
+   * `maxDocs` is the caller's cap on this call's work (changed + removed) — the
+   * one judgement shared by every path and both modes. Over it nothing is
+   * embedded and nothing is written: the outcome is `mode: 'deferred'` with
+   * `pendingDocs`, and the caller decides whether to hand off or refuse.
    */
   async sync(
     state: SourceState,
@@ -460,57 +497,47 @@ export class IndexDb {
   ): Promise<SyncMetering> {
     const hashMs = options.hashMs ?? 0;
     const t0 = performance.now();
-    const stored = this.storedHash();
-    // An index that has never been built (empty stored hash) needs a full build,
-    // not a delta: every document would be "changed" and the delta path would
-    // trip the backlog cap instead of doing the one honest thing.
-    const mode: SyncMode =
-      options.full === true || stored === '' ? 'full' : stored === state.hash ? 'noop' : 'incremental';
+    const { mode, changed, removed } = this.diffFor(state, options.full === true);
     if (mode === 'noop') {
       return this.metering(state, false, 0, hashMs, t0, 0, 'noop');
     }
-
-    const have = new Map<number, [string, string]>();
-    if (mode === 'incremental') {
-      for (const row of this.db
-        .prepare('SELECT doc_id, updated_at, content_sha FROM docs')
-        .all() as Array<{ doc_id: number; updated_at: string; content_sha: string }>) {
-        have.set(row.doc_id, [row.updated_at, row.content_sha]);
-      }
-    }
-
-    const want = new Map<number, [string, string]>();
-    for (const doc of state.docs) want.set(doc.id, [doc.updatedAt, contentSha(doc.title, doc.content)]);
-
-    let changed: SourceDoc[] = state.docs;
-    let removed: number[] = [];
-    if (mode === 'incremental') {
-      changed = [];
-      for (const doc of state.docs) {
-        const key = want.get(doc.id)!;
-        if (have.get(doc.id)?.[0] !== key[0] || have.get(doc.id)?.[1] !== key[1]) changed.push(doc);
-      }
-      removed = [...have.keys()].filter((id) => !want.has(id)).sort((a, b) => a - b);
-      if (changed.length === 0 && removed.length === 0) {
-        // The hash moved but no document did (e.g. only a volatile column).
-        this.db.exec('BEGIN IMMEDIATE');
+    if (mode === 'incremental' && changed.length === 0 && removed.length === 0) {
+      // The hash moved but no document did (e.g. only a volatile column).
+      this.db.exec('BEGIN IMMEDIATE');
+      try {
+        this.assertWriteAllowed(options);
         this.db.prepare('INSERT OR REPLACE INTO meta VALUES (?,?)').run('source_hash', state.hash);
         this.db.exec('COMMIT');
-        return this.metering(state, true, 0, hashMs, t0, 0, 'hash-only');
+      } catch (error) {
+        try {
+          this.db.exec('ROLLBACK');
+        } catch {
+          /* the transaction is already gone */
+        }
+        throw error;
       }
+      return this.metering(state, true, 0, hashMs, t0, 0, 'hash-only');
     }
 
     const touched = [...changed.map((d) => d.id), ...removed];
-    if (mode === 'incremental' && touched.length > MAX_INLINE_SYNC_DOCS) {
-      throw new BacklogError(touched.length, this.path);
+    const maxDocs = options.maxDocs ?? Number.POSITIVE_INFINITY;
+    if (touched.length > maxDocs) {
+      return this.metering(state, true, 0, hashMs, t0, 0, 'deferred', touched.length);
     }
 
     // Embed BEFORE opening the write transaction: an embedding failure must not
-    // leave a half-applied index, and holding a write lock across a slow WASM
-    // call would block the source for no reason.
+    // leave a half-applied index. Sliced so the lock holder can heartbeat
+    // between slices; vectors are batch-independent, so slicing cannot change
+    // them (V2b).
     const vectors = new Map<number, Float32Array>();
     if (changed.length > 0) {
-      const embedded = await embed.embed(changed.map((doc) => documentText(doc)));
+      const texts = changed.map((doc) => documentText(doc));
+      const embedded: Float32Array[] = [];
+      for (let start = 0; start < texts.length; start += EMBED_SLICE_DOCS) {
+        const slice = texts.slice(start, start + EMBED_SLICE_DOCS);
+        embedded.push(...(await embed.embed(slice)));
+        options.onProgress?.();
+      }
       if (embedded.length !== changed.length) {
         throw new Error(
           `engram-bridge: 嵌入器返回 ${embedded.length} 个向量，但待嵌入文档为 ${changed.length} 个`,
@@ -521,8 +548,12 @@ export class IndexDb {
 
     const { docRows, entries } = applyDocs(changed);
     const prefix = `${process.pid}-${Date.now()}`;
+    // Last cheap heartbeat: the closing stretch (applyDocs + the transaction)
+    // has no other progress point (design D6).
+    options.onProgress?.();
     this.db.exec('BEGIN IMMEDIATE');
     try {
+      this.assertWriteAllowed(options);
       this.db.prepare('INSERT OR REPLACE INTO meta VALUES (?,?)').run('update_prefix', prefix);
       // Every (token, kind) whose row count MAY have changed: those currently
       // posted for a touched document, plus every term of the incoming docs.
@@ -652,6 +683,69 @@ export class IndexDb {
     }
   }
 
+  /**
+   * What a sync against `state` would do — no embedding, no writes. Callers use
+   * it to compare the work against their cap BEFORE loading the model, which is
+   * the whole point of the operator path's cheap refusal (design D7).
+   */
+  planFor(state: SourceState, full = false): SyncPlan {
+    const { mode, changed, removed } = this.diffFor(state, full);
+    return { mode, touched: changed.length + removed.length };
+  }
+
+  /**
+   * The one diff, used by both the plan and the sync itself so they cannot
+   * drift. `full` (or an index that has never been built) means every document
+   * is work.
+   */
+  private diffFor(
+    state: SourceState,
+    full: boolean,
+  ): { mode: SyncMode; changed: SourceDoc[]; removed: number[] } {
+    const stored = this.storedHash();
+    const mode: SyncMode = full || stored === '' ? 'full' : stored === state.hash ? 'noop' : 'incremental';
+    if (mode === 'noop') return { mode, changed: [], removed: [] };
+    if (mode === 'full') return { mode, changed: state.docs, removed: [] };
+
+    const have = new Map<number, [string, string]>();
+    for (const row of this.db
+      .prepare('SELECT doc_id, updated_at, content_sha FROM docs')
+      .all() as Array<{ doc_id: number; updated_at: string; content_sha: string }>) {
+      have.set(row.doc_id, [row.updated_at, row.content_sha]);
+    }
+    const want = new Map<number, [string, string]>();
+    for (const doc of state.docs) want.set(doc.id, [doc.updatedAt, contentSha(doc.title, doc.content)]);
+    const changed: SourceDoc[] = [];
+    for (const doc of state.docs) {
+      const key = want.get(doc.id)!;
+      if (have.get(doc.id)?.[0] !== key[0] || have.get(doc.id)?.[1] !== key[1]) changed.push(doc);
+    }
+    const removed = [...have.keys()].filter((id) => !want.has(id)).sort((a, b) => a - b);
+    return { mode, changed, removed };
+  }
+
+  /**
+   * The write-transaction guard. Runs right after `BEGIN IMMEDIATE`, which is
+   * the only place it means anything: the embedding gap before it can last
+   * minutes, so a check "before the transaction" would prove nothing.
+   *
+   *  * `assertStillHeld` lets the lock holder verify it still owns the lock
+   *    (by PATH — an fd always matches its own inode, design D6);
+   *  * `expectedStoredHash` catches another writer that committed during the
+   *    gap: our diff was computed against a snapshot that is no longer current,
+   *    so applying it would move the index backwards.
+   */
+  private assertWriteAllowed(options: SyncOptions): void {
+    options.assertStillHeld?.();
+    if (options.expectedStoredHash !== undefined && this.storedHash() !== options.expectedStoredHash) {
+      const error = new Error(
+        'engram-bridge: 嵌入期间索引已被另一个写入者更新，本次写入放弃（派生数据未被改动）',
+      );
+      (error as { kind?: string }).kind = 'busy';
+      throw error;
+    }
+  }
+
   private metering(
     state: SourceState,
     sourceChanged: boolean,
@@ -660,6 +754,7 @@ export class IndexDb {
     t0: number,
     embedDocs: number,
     mode: SyncMode,
+    pendingDocs?: number,
   ): SyncMetering {
     let indexBytes = 0;
     try {
@@ -675,6 +770,7 @@ export class IndexDb {
       syncMs: performance.now() - t0,
       embedDocs,
       mode,
+      ...(pendingDocs === undefined ? {} : { pendingDocs }),
       docCount: state.docs.length,
       indexBytes,
     };

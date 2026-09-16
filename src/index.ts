@@ -17,10 +17,19 @@ import { blocksToText, EventShapeWarnings, readEventPayload, turnFinalText, type
 import { errorMessage, loggerFrom, type Logger } from './log.js';
 import { McpClient, type McpCallResult, type McpToolDeclaration } from './mcp-client.js';
 import { ConnectionPool } from './pool.js';
-import { RecallProcessManager, RecallUnavailableError } from './recall/process.js';
+import type { CommandDefinition } from '@deepseek-ai/dsh-commands';
+import { RecallProcessManager, RecallUnavailableError, ONESHOT_TIMEOUT_MS } from './recall/process.js';
 import type { ExpectedIdentity } from './recall/model-expected.js';
 import type { RecallPayload, RecallQuery } from './recall/protocol.js';
-import { buildRecallToolDefinition, RECALL_INPUT_SCHEMA, RECALL_TOOL_NAME } from './recall-tool.js';
+import { buildRecallCommandDefinition } from './recall-command.js';
+import {
+  buildRecallSyncToolDefinition,
+  buildRecallToolDefinition,
+  RECALL_INPUT_SCHEMA,
+  RECALL_SYNC_TOOL_NAME,
+  RECALL_SYNC_INPUT_SCHEMA,
+  RECALL_TOOL_NAME,
+} from './recall-tool.js';
 import { guardEngramTools, isSubagentSession, shadowEngramTools, TOOL_PREFIX } from './subagent.js';
 import { readToolCache, sameToolSurface, toolCacheFingerprint, toolCachePath, writeToolCache } from './tool-cache.js';
 import { buildToolDefinitions, siteOf, type ToolCallSite } from './tools.js';
@@ -52,6 +61,14 @@ interface PluginContext {
   on(event: string, listener: (...args: never[]) => unknown): unknown;
   effect(callback: () => (() => void) | void, label?: string): unknown;
   tools: { register(definition: ToolDefinition): () => void };
+  /**
+   * Cordis service injection. Optional on purpose: the operator command is a
+   * repair tool, so a host without the commands service must still load the
+   * bridge — it simply has no such command. Putting `commands` in the plugin's
+   * own `inject` would make the WHOLE plugin inactive in such a profile.
+   */
+  inject?(deps: readonly string[], callback: (ctx: PluginContext) => void): unknown;
+  commands?: { register(definition: CommandDefinition): () => void };
 }
 
 /**
@@ -148,6 +165,34 @@ export function apply(ctx: PluginContext, config: EngramConfig, deps: PluginDeps
     'engram-bridge.recall-sweep',
   );
 
+  // The operator path (design D8): a human command, registered through an
+  // OPTIONAL injection of the host's command registry. Two things are load
+  // bearing here. It must not live inside `registerTools()` — that function
+  // returns early when the engram tool surface is empty (cold tool cache), and
+  // the repair path is exactly what is needed in that state. And it must not be
+  // registered on a ctx that did not inject `commands`: cordis's ctx proxy
+  // throws when reading a service it was not given, which would take the whole
+  // plugin down in a profile without that service.
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['commands'], (commandCtx) => {
+      const commands = commandCtx.commands;
+      if (commands === undefined) return;
+      commandCtx.effect(
+        () =>
+          commands.register(
+            buildRecallCommandDefinition({
+              run: (exec) => recallManager.syncUnbounded(exec.signal),
+            }),
+          ),
+        'engram-bridge.command',
+      );
+    });
+  } else {
+    // Optional capability absent: the bridge is fully functional, it just has no
+    // operator command. Not a warning — a host without the registry is legal.
+    log.debug('宿主没有 commands 注入点：操作者命令未注册（其余能力不受影响）');
+  }
+
   let disposers: Array<() => void> = [];
   let registeredSurface: readonly McpToolDeclaration[] = [];
   const registerTools = (declarations: readonly McpToolDeclaration[], origin: string): void => {
@@ -178,6 +223,14 @@ export function apply(ctx: PluginContext, config: EngramConfig, deps: PluginDeps
     });
     registeredNames.add(recallDefinition.name);
     disposers.push(ctx.tools.register(recallDefinition));
+    // The explicit entry lives beside retrieval and shares its lifecycle. Its
+    // declared timeout IS its capacity: one number, one meaning (design D7).
+    const syncDefinition = buildRecallSyncToolDefinition({
+      timeoutMs: ONESHOT_TIMEOUT_MS,
+      run: runRecallSync,
+    });
+    registeredNames.add(syncDefinition.name);
+    disposers.push(ctx.tools.register(syncDefinition));
     log.info(`registered ${registeredNames.size} engram tools (${origin})`);
     // Registration can finish after a sub-agent was created: at creation time there were no
     // names to deny, so the visibility restriction has to be re-applied now.
@@ -251,10 +304,13 @@ export function apply(ctx: PluginContext, config: EngramConfig, deps: PluginDeps
    *  3. `project` goes through the same injection path as the engram tools, so an
    *     explicit caller value always wins.
    */
-  async function runRecall(
-    request: RecallQuery,
-    exec: { agent?: unknown; signal?: AbortSignal },
-  ): Promise<RecallPayload> {
+  /**
+   * Retrieval's engine switch, checked at the call site for the MODEL-FACING
+   * entries (retrieval and the explicit catch-up tool). The operator command
+   * deliberately does not use it: it is the repair path, and a disabled
+   * retriever is exactly when it may be needed (design D8).
+   */
+  function assertModelFacingEnabled(): void {
     if (config.searchEnabled === false) {
       throw new RecallUnavailableError(
         'disabled',
@@ -262,6 +318,13 @@ export function apply(ctx: PluginContext, config: EngramConfig, deps: PluginDeps
           '也不会静默改用别的检索实现。',
       );
     }
+  }
+
+  async function runRecall(
+    request: RecallQuery,
+    exec: { agent?: unknown; signal?: AbortSignal },
+  ): Promise<RecallPayload> {
+    assertModelFacingEnabled();
     const wantsAll = request.allProjects === true;
     if (!wantsAll && request.project === undefined && config.injectSessionProject === false) {
       throw new RecallUnavailableError(
@@ -299,6 +362,15 @@ export function apply(ctx: PluginContext, config: EngramConfig, deps: PluginDeps
       project,
       ...(wantsAll ? { allProjects: true } : {}),
     });
+  }
+
+  /**
+   * The model-facing explicit entry: one capped catch-up. It is bounded by the
+   * tool's own static timeout, which is also where its capacity comes from.
+   */
+  async function runRecallSync(_exec: { agent?: unknown; signal?: AbortSignal }): Promise<string> {
+    assertModelFacingEnabled();
+    return await recallManager.catchUp();
   }
 
   const capture = new PassiveCapture({

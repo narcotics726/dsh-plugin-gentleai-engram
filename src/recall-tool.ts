@@ -16,6 +16,14 @@ import type { RecallPayload, RecallQuery } from './recall/protocol.js';
 export const RECALL_TOOL_NAME = `${TOOL_PREFIX}mem_bridge_recall`;
 
 /**
+ * The model-facing explicit entry. It is a SEPARATE tool, not a parameter on
+ * retrieval, because the wait it may spend is a decision the caller has to make
+ * knowingly: retrieval stays fast or refuses, and this tool is where "I am
+ * willing to wait minutes" becomes a distinct, describable action (design D7).
+ */
+export const RECALL_SYNC_TOOL_NAME = `${TOOL_PREFIX}mem_bridge_recall_sync`;
+
+/**
  * THE single declaration of the return-count default. It appears in this tool's
  * input schema and nowhere else — config deliberately offers no second default
  * for it (design D6/D9), so a test can read it out of the schema.
@@ -172,4 +180,48 @@ export function buildRecallToolDefinition(deps: RecallToolDeps): ToolDefinition 
 function normaliseLimit(value: unknown): number {
   const limit = typeof value === 'number' && Number.isFinite(value) ? Math.floor(value) : DEFAULT_RECALL_LIMIT;
   return Math.min(100, Math.max(1, limit));
+}
+
+/** No parameters: the caller's only decision is whether to wait at all. */
+export const RECALL_SYNC_INPUT_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {},
+  required: [],
+};
+
+export const RECALL_SYNC_OUTPUT_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: { summary: { type: 'string' } },
+  required: ['summary'],
+  additionalProperties: false,
+};
+
+export interface RecallSyncToolDeps {
+  /**
+   * The tool's own declared budget. Every tool carries a static timeout, and
+   * this one is the number the capacity derivation uses — nothing else.
+   */
+  timeoutMs: number;
+  run: (exec: { agent?: unknown; signal?: AbortSignal }) => Promise<string>;
+}
+
+export function buildRecallSyncToolDefinition(deps: RecallSyncToolDeps): ToolDefinition {
+  return {
+    name: RECALL_SYNC_TOOL_NAME,
+    description:
+      '把记忆检索的派生索引追到最新（一次调用完成，可能耗时数分钟）。' +
+      '只在检索明确告知"待处理量超出自动上限"、且调用方愿意等时使用：' +
+      '调用前请先告知用户将要等待，完成后重新发起原来的检索。',
+    parameters: RECALL_SYNC_INPUT_SCHEMA,
+    timeoutMs: deps.timeoutMs,
+    output: {
+      schema: RECALL_SYNC_OUTPUT_SCHEMA,
+      render: (_args: unknown, value: unknown) => [
+        { type: 'text' as const, text: (value as { summary?: string } | undefined)?.summary ?? '派生索引已追到最新。' },
+      ],
+    },
+    execute: async (_args: unknown, exec: { agent?: unknown; signal?: AbortSignal }): Promise<unknown> => ({
+      summary: await deps.run(exec),
+    }),
+  };
 }

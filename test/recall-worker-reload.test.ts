@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { test } from 'node:test';
@@ -38,7 +38,7 @@ interface WorkerHarness {
   stderr(): string;
 }
 
-function startWorker(dir: string, modelDir: string): WorkerHarness {
+function startWorker(dir: string, modelDir: string, maxDocs = '4'): WorkerHarness {
   const child: ChildProcessWithoutNullStreams = spawn(process.execPath, [WORKER], {
     env: {
       ...process.env,
@@ -49,6 +49,7 @@ function startWorker(dir: string, modelDir: string): WorkerHarness {
       ENGRAM_BRIDGE_W: '0.2',
       ENGRAM_BRIDGE_TOP_K: '50',
       ENGRAM_BRIDGE_COVERAGE: 'field_cov',
+      ENGRAM_BRIDGE_MAX_DOCS: maxDocs,
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
@@ -156,7 +157,7 @@ test('[2.5] 嵌入加载失败不被永久记住：文件缺失（runtime-missin
 });
 
 /** Run the one-shot `--rebuild` child to completion and report its exit code. */
-function rebuildExit(dir: string, modelDir: string, dbPath: string): Promise<number> {
+function rebuildExit(dir: string, modelDir: string, dbPath: string, maxDocs = '4'): Promise<number> {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [WORKER, '--rebuild'], {
       env: {
@@ -168,10 +169,44 @@ function rebuildExit(dir: string, modelDir: string, dbPath: string): Promise<num
         ENGRAM_BRIDGE_W: '0.2',
         ENGRAM_BRIDGE_TOP_K: '50',
         ENGRAM_BRIDGE_COVERAGE: 'field_cov',
+        ENGRAM_BRIDGE_MAX_DOCS: maxDocs,
       },
       stdio: ['ignore', 'ignore', 'ignore'],
     });
     child.on('exit', (code) => resolve(code ?? -1));
+  });
+}
+
+/** Run one one-shot mode to completion, capturing stdout and the exit code. */
+function oneShot(
+  mode: '--sync' | '--rebuild',
+  dir: string,
+  modelDir: string,
+  maxDocs: string,
+): Promise<{ code: number; out: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [WORKER, mode], {
+      env: {
+        ...process.env,
+        ENGRAM_BRIDGE_DB_PATH: join(dir, 'source.db'),
+        ENGRAM_BRIDGE_INDEX_PATH: join(dir, 'index', 'index.db'),
+        ENGRAM_BRIDGE_MODEL_DIR: modelDir,
+        ENGRAM_BRIDGE_THREADS: '1',
+        ENGRAM_BRIDGE_W: '0.2',
+        ENGRAM_BRIDGE_TOP_K: '50',
+        ENGRAM_BRIDGE_COVERAGE: 'field_cov',
+        ENGRAM_BRIDGE_MAX_DOCS: maxDocs,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    child.stdout.on('data', (chunk: Buffer) => {
+      out += chunk.toString('utf8');
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      out += chunk.toString('utf8');
+    });
+    child.on('exit', (code) => resolve({ code: code ?? -1, out }));
   });
 }
 
@@ -194,6 +229,51 @@ test('[2.6] --rebuild 子进程用独立退出码区分模型原因', async () =
       '其它原因仍用通用退出码',
     );
   } finally {
+    removeDir(dir);
+  }
+});
+
+test('[4.2] --sync：上限足够就在一次调用里建/追上；不足则退出码 4 且不碰任何文件', async () => {
+  const dir = tempDir('recall-oneshot-');
+  try {
+    const { modelDir } = fixture(dir);
+    const indexPath = join(dir, 'index', 'index.db');
+
+    // Over the cap: refuse on the spot. Nothing may be created, and the cap
+    // judgement must precede the model load.
+    const denied = await oneShot('--sync', dir, modelDir, '0');
+    assert.equal(denied.code, 4, `超限必须以退出码 4 退出：${denied.out}`);
+    assert.ok(!existsSync(indexPath), '被拒绝的一次性同步不得建立索引文件');
+    assert.ok(!denied.out.includes('嵌入运行时'), '上限判定必须先于模型加载');
+
+    // Within the cap: a fresh index has never been built, so this is a full
+    // build — in one call, and in one transaction.
+    const built = await oneShot('--sync', dir, modelDir, '4');
+    assert.equal(built.code, 0, built.out);
+    assert.ok(existsSync(indexPath));
+    assert.match(built.out, /全量重建完成/);
+
+    // Again: nothing changed, so it is a no-op rather than an error.
+    const again = await oneShot('--sync', dir, modelDir, '4');
+    assert.equal(again.code, 0, again.out);
+    assert.match(again.out, /已是最新/);
+  } finally {
+    removeDir(dir);
+  }
+});
+
+test('[4.2] 残留的 cmd:rebuild 也受限额约束：超限返回 sync-needed 帧而不是成功重建', async () => {
+  const dir = tempDir('recall-cmd-rebuild-');
+  let harness: WorkerHarness | undefined;
+  try {
+    const { modelDir } = fixture(dir);
+    harness = startWorker(dir, modelDir, '0');
+    const frame = await harness.request(1, 'rebuild');
+    assert.equal(frame.ok, false);
+    assert.equal(frame.error?.kind, 'sync-needed', JSON.stringify(frame));
+    assert.notEqual(frame.error?.kind, 'internal');
+  } finally {
+    await harness?.close();
     removeDir(dir);
   }
 });

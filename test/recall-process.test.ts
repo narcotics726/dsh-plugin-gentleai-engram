@@ -191,54 +191,160 @@ test('单次调用超时：以明确原因失败并终止子进程', async () =>
   }
 });
 
-test('索引需要重建：自动跑一次全量重建再重试，且不把重建留给模型', async () => {
-  const h = harness({ STUB_REBUILD_NEEDED: '1' });
-  try {
-    const payload = await h.manager.query({ query: 'a', limit: 1, project: 'alpha' });
-    assert.equal(payload.hits.length, 1);
-    assert.ok(existsSync(`${h.flag}.rebuilt`), '应已运行过一次性重建');
-    assert.ok(h.notes().includes('rebuild'), '重建必须以独立进程运行');
-    assert.ok(h.logs.some((line) => /开始全量重建/.test(line)));
-    // 重试发生在重建之后，且只重试一次。
-    assert.equal(h.notes().filter((line) => line === 'cmd:query').length, 2);
-  } finally {
-    await h.cleanup();
-  }
-});
-
-test('重建失败时把失败原因报给调用方，而不是继续重试', async () => {
-  const h = harness({ STUB_REBUILD_NEEDED: '1', STUB_REBUILD_EXIT: '1' });
+test('[5.2] 需要更多工作：不起任何子进程，直接以明确原因拒绝（不再自动转交）', async () => {
+  const h = harness({ STUB_SYNC_NEEDED: '40' });
   try {
     await assert.rejects(
       () => h.manager.query({ query: 'a', limit: 1, project: 'alpha' }),
       (error: unknown) => {
         assert.ok(error instanceof RecallUnavailableError);
-        assert.equal(error.kind, 'internal');
-        assert.match(error.message, /全量重建派生索引失败/);
+        assert.equal(error.kind, 'backlog');
+        assert.notEqual(error.kind, 'internal');
         return true;
       },
     );
-    assert.equal(h.notes().filter((line) => line === 'cmd:query').length, 1, '重建失败不应再重试');
+    assert.equal(h.notes().filter((line) => line === 'cmd:query').length, 1, '只查询一次，不重试');
+    assert.ok(!h.notes().includes('sync'), '不得起一次性进程');
+    assert.ok(!h.notes().includes('rebuild'), '不得起一次性进程');
+    assert.equal(h.manager.running(), true, '常驻进程仍在，只是这次拒绝了');
   } finally {
     await h.cleanup();
   }
 });
 
-test('[2.6] 重建因模型原因失败时以独立退出码归一为 runtime-missing', async () => {
-  const h = harness({ STUB_REBUILD_NEEDED: '1', STUB_REBUILD_EXIT: '3' });
+test('[5.2] 正在更新：以同类原因拒绝，且 kind 不是 internal', async () => {
+  const h = harness({ STUB_BUSY: '1' });
   try {
     await assert.rejects(
       () => h.manager.query({ query: 'a', limit: 1, project: 'alpha' }),
       (error: unknown) => {
         assert.ok(error instanceof RecallUnavailableError);
-        assert.equal(
-          error.kind,
-          'runtime-missing',
-          '模型原因不得被报成「重建失败」',
-        );
+        assert.equal(error.kind, 'busy');
+        assert.match(error.message, /正在被另一个进程更新/);
         return true;
       },
     );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('[5.4] 拒绝文案：条数 / 自动上限 / 显式入口 / 预估秒数 / 未改动；超出入口上限时改指操作者命令', async () => {
+  const within = harness({ STUB_SYNC_NEEDED: '100' }, { rebuildThreads: 2 });
+  try {
+    const error = await within.manager
+      .query({ query: 'a', limit: 1, project: 'alpha' })
+      .then(() => undefined, (e: unknown) => e as RecallUnavailableError);
+    assert.ok(error instanceof RecallUnavailableError);
+    assert.match(error.message, /100 条/);
+    assert.match(error.message, /mem_bridge_recall_sync/);
+    assert.match(error.message, /预计约 \d+ 秒/);
+    assert.match(error.message, /没有被改动/);
+    assert.doesNotMatch(error.message, /删除索引/);
+    assert.doesNotMatch(error.message, /自动重试/);
+  } finally {
+    await within.cleanup();
+  }
+
+  const beyond = harness(
+    { STUB_SYNC_NEEDED: '5000' },
+    { rebuildThreads: 1, embedMsPerDocPerThread: 1000 },
+  );
+  try {
+    const error = await beyond.manager
+      .query({ query: 'a', limit: 1, project: 'alpha' })
+      .then(() => undefined, (e: unknown) => e as RecallUnavailableError);
+    assert.ok(error instanceof RecallUnavailableError);
+    assert.match(error.message, /engram-sync/, '连入口也放不下时必须指出操作者路径');
+    assert.match(error.message, /searchTimeoutMs/);
+  } finally {
+    await beyond.cleanup();
+  }
+});
+
+test('[5.3] 显式入口走 --sync，并把子进程的摘要回报给调用方', async () => {
+  const h = harness();
+  try {
+    const summary = await h.manager.catchUp();
+    assert.match(summary, /增量同步完成/);
+    assert.ok(h.notes().includes('sync'), '显式入口必须走 --sync');
+    assert.ok(!h.notes().includes('rebuild'));
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('[5.3] 一次性进程的退出码归一：3 → runtime-missing，4 → backlog，其它 → internal', async () => {
+  const cases: Array<[string, string]> = [
+    ['3', 'runtime-missing'],
+    ['4', 'backlog'],
+    ['1', 'internal'],
+  ];
+  for (const [exit, kind] of cases) {
+    const h = harness({ STUB_REBUILD_EXIT: exit });
+    try {
+      await assert.rejects(
+        () => h.manager.rebuild(),
+        (error: unknown) => {
+          assert.ok(error instanceof RecallUnavailableError);
+          assert.equal(error.kind, kind, `exit=${exit}`);
+          return true;
+        },
+      );
+      assert.ok(h.notes().includes('rebuild'), '一次性进程必须以独立进程运行');
+    } finally {
+      await h.cleanup();
+    }
+  }
+});
+
+test('[5.3] 一次性运行期间：常驻不重启、检索得到 busy、且没有无人处理的 rejection', async () => {
+  const h = harness({ STUB_SYNC_DELAY_MS: '800' });
+  try {
+    const inflight = h.manager.catchUp();
+    await waitFor(() => h.notes().includes('sync'));
+    assert.equal(h.manager.running(), false, '一次性运行期间不得有常驻进程');
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown): void => {
+      rejections.push(reason);
+    };
+    process.on('unhandledRejection', onRejection);
+    try {
+      await assert.rejects(
+        () => h.manager.query({ query: 'a', limit: 1, project: 'alpha' }),
+        (error: unknown) => {
+          assert.ok(error instanceof RecallUnavailableError);
+          assert.equal(error.kind, 'busy');
+          assert.notEqual(error.kind, 'internal');
+          return true;
+        },
+      );
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.deepEqual(rejections, [], '闸期间不得产生无人处理的 rejection');
+      assert.equal(h.manager.running(), false, '闸期间不得启动常驻进程');
+    } finally {
+      process.off('unhandledRejection', onRejection);
+    }
+    await inflight;
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('[5.3] 一次性运行期间 dispose：迅速返回并终止它（不留下跑满预算的子进程）', async () => {
+  const h = harness({ STUB_SYNC_DELAY_MS: '30000' });
+  try {
+    const inflight = h.manager.catchUp().then(
+      () => 'finished' as const,
+      (error: unknown) => error,
+    );
+    await waitFor(() => h.notes().includes('sync'));
+    const t0 = Date.now();
+    await h.manager.dispose();
+    const elapsed = Date.now() - t0;
+    assert.ok(elapsed < 3000, `dispose 不得等一次性进程自己结束（实际 ${elapsed}ms）`);
+    const settled = await inflight;
+    assert.ok(settled instanceof Error, '被终止的一次性进程必须以失败结算，而不是悄悄完成');
   } finally {
     await h.cleanup();
   }

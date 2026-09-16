@@ -164,6 +164,18 @@ test('边界机制：宿主入口不触及嵌入运行时，且对违规 import 
     const probe = join(dir, 'probe.js');
     writeFileSync(probe, "import * as ort from 'onnxruntime-web';\nexport const x = ort;\n");
     assert.throws(() => execFileSync(process.execPath, [script, probe], { encoding: 'utf8', stdio: 'pipe' }));
+
+    // 锁模块同样只在写入者进程里：宿主拿它没有意义（宿主不写索引），而把它
+    // 挡在宿主闭包外是一条机制，不是一句声明。
+    assert.match(
+      readFileSync(script, 'utf8'),
+      /FORBIDDEN_FILES\s*=\s*new Set\(\[[^\]]*'index-lock\.js'/,
+      '锁模块必须在宿主入口的禁触清单里',
+    );
+    const lockProbe = join(dir, 'lock-probe.js');
+    writeFileSync(lockProbe, "import './x.js';\nexport const x = 1;\n");
+    writeFileSync(join(dir, 'x.js'), "export {};\n");
+    assert.ok(readFileSync(script, 'utf8').includes("'index-lock.js'"));
   } finally {
     removeDir(dir);
   }

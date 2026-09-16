@@ -346,6 +346,10 @@ test('a config that omits poolSweepIntervalMs falls back to the default, not a b
     assert.deepEqual(readExits(callsPath).filter((cwd) => cwd === repo), []);
   } finally {
     host.disposeAll();
+    // The engram stub appends its exit record from its own process; give it a
+    // moment to settle, otherwise the removal below races with that write
+    // (ENOTEMPTY, reproduced before this wait existed).
+    await new Promise((resolve) => setTimeout(resolve, 200));
     rmSync(temp, { recursive: true, force: true });
     if (previousHome === undefined) delete process.env.DSH_HOME;
     else process.env.DSH_HOME = previousHome;

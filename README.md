@@ -61,6 +61,7 @@ engram 自带的 `mem_search` **不再注册**（FTS5 的中文分词按标点�
 
 - `~/.dsh/AGENTS.md` 的记忆协议段里提到 `mem_search` 的地方；
 - `~/.dsh/skills/engram-memory/SKILL.md`：把 `mem_search` 换成 `mem_bridge_recall`，并把"FTS5 全文检索"改为事实表述（它是 bigram 词法覆盖 + 语义向量的混合检索），同时补一句"省略范围时两种范围都可以出现"。
+- 同一处再补一句**积压时的三步**：检索明确告知「待处理量超出自动上限」时，先调用 `mem_bridge_recall_sync`（它可能耗时数分钟，**调用前先告知用户**），完成后重发原检索；若错误里说连它也放不下，就让操作者运行 `/engram-sync`。
 
 ## 配置
 
@@ -90,12 +91,12 @@ engram 自带的 `mem_search` **不再注册**（FTS5 的中文分词按标点�
 | `recallWakeup` | `true` | 手动压缩后是否唤醒一轮独立的自恢复回合；`false` = 只投递不唤醒（已知退化，见下） |
 | `searchEnabled` | `true` | 检索引擎开关。在**调用点**判定：关闭后调用被以明确原因拒绝，不静默换回别的检索 |
 | `searchDbPath` | `~/.engram/engram.db` | engram 正本数据库（读层只读它） |
-| `searchIndexDir` | `$DSH_HOME/storages/engram-bridge/index` | 派生索引目录；可删除，下次检索重建 |
+| `searchIndexDir` | `$DSH_HOME/storages/engram-bridge/index` | 派生索引目录；可删除，下次检索重建。目录内含 `index.db{,-wal,-shm}` 与运行时锁文件 `index.db.lock`（记录 pid / host / 最近进展时间）——本地派生状态，不要提交或外发 |
 | `searchModelDir` | `$DSH_HOME/storages/engram-bridge/model` | 模型与裁剪后运行时目录（见上面的显式安装） |
 | `embedThreads` | `1` | `ort.env.wasm.numThreads`。常驻内存几乎完全由它决定（1 线程实测 512 MB） |
 | `searchIdleMs` | `600000` | 检索子进程空闲多久被回收；`0` = 不回收 |
 | `searchSweepIntervalMs` | `60000` | 空闲回收的检查间隔，下限 `1000` |
-| `searchTimeoutMs` | `60000` | 单次检索超时；超时会终止检索子进程 |
+| `searchTimeoutMs` | `60000` | 单次检索预算；超时会终止检索子进程。它同时决定常规检索**能自动处理多少同步**：超出即明确拒绝并指出显式入口，而不是静默变慢 |
 | `searchW` | `0.20` | 覆盖率提升权重（P2 调参、P3 留出确认，勿随手改） |
 | `searchTopK` | `50` | 覆盖率提升所及的排序深度；不是候选集上限 |
 | `searchCoverage` | `field_cov` | 覆盖率变体：`field_cov` / `cov_n` / `idf_cov` |
@@ -109,15 +110,25 @@ engram 自带的 `mem_search` **不再注册**（FTS5 的中文分词按标点�
 
 - **工具**：engram 的工具以 `mcp__engram__*` 出现在模型工具面；对子 agent 不可见（含 `mcp_call` 之类旁路）。
 - **检索**：`mcp__engram__mem_bridge_recall` 是插件自有的只读检索入口（不是 engram 声明的工具）：本地派生索引、默认只返回当前项目的记忆、要求跨项目须显式 `all_projects`、结果被截断时会说明还有未显示的条目、类型取值不做枚举（传了不存在的取值会换来实际取值）。它不写记忆、不改正本、删掉索引即可恢复原状。
+- **显式追赶**：`mcp__engram__mem_bridge_recall_sync` 把派生索引一次追到最新（可能耗时数分钟，**调用前应先告知用户会等待**，完成后重发原检索）。它在检索明确告知「待处理量超出自动上限」时使用；不改配置、不重启宿主。它受 `searchEnabled` 约束（与检索同一道开关）。
 - **隐式参数**：声明 `project` / `session_id` 的工具由插件补齐当前会话的项目与会话 id，显式传参优先；`mem_session_start` 的 `id` 由插件持有，模型改不了。检索工具同样按自己声明的参数接受注入；**项目注入被关闭且未显式传 `project` 时，检索被拒绝**（附两条出路），不会以未限定项目运行。
 - **压缩**：`compaction/summary` 自动落库，模型无需自己再存摘要；`compaction/end` 后注入一段有界召回。手动 `/compact` 会立即开启一轮独立的自恢复回合。
 - **提示词**：不新增 system prompt 段；召回是一条 user 消息，会话日志可完整重建。
 - **engram 不可用时**：相关能力失效并记日志，不阻断模型轮次。
 
+## 操作者命令：`/engram-sync`
+
+积压大到连显式入口一次也做不完时（默认约 7200 条），在会话里输入 `/engram-sync` 可以**不受单次预算约束**地把派生索引追到最新：它走同一个检索进程管理器（同一份配置、同一把锁、先停常驻再干活），可以取消，发起与结果都记进会话日志。
+
+- **它不受 `searchEnabled` 约束**：那个开关管的是由模型发起的检索与追赶入口，而这条命令是修复手段——可能正用在"先修好再打开"的场景里。
+- 宿主没有命令注册表时，这条命令不存在，其余能力不受影响。
+
 ## 已知代价
 
 - **每次手动 `/compact` 多一个 LLM 回合**（自恢复回合同样以 `agent/turn-stopping` 收尾，会多一次被动捕获）。`recallWakeup: false` 可拒绝该成本，代价是召回要等用户下一条消息，且可能被取消或会话销毁丢弃。
 - **自恢复回合进行期间无法再次压缩**：压缩需要宿主 idle，这一轮跑完前 `/compact` 会被拒绝。
+- **积压超出常规检索的自动上限时，检索会拒绝而不是自己慢慢追**（这是刻意的：等待要由调用方知情选择）。错误里给出待处理条数、预估耗时与可用的入口；`/engram-sync` 是那一档剩下的唯一出路。
+- **一次显式追赶会占住一次调用最多 10 分钟**（操作者命令不设上限，靠取消与卸载终止）。**同一份派生数据同一时刻只有一个写入者**（跨进程锁 + 进展心跳）；追赶期间并发的检索会以「正在更新」失败，而不是读到半成品。
 
 ## 深入阅读
 

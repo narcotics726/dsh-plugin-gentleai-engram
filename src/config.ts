@@ -86,7 +86,12 @@ export interface Config {
   searchIdleMs: number;
   /** How often the plugin sweeps the idle recall worker itself (>= 1000). */
   searchSweepIntervalMs: number;
-  /** Per-retrieval budget; on expiry the worker is killed and the call fails. */
+  /**
+   * Per-retrieval budget; on expiry the worker is killed and the call fails.
+   * It also decides how much catch-up a normal retrieval may do on its own
+   * (design D4): over that, the call refuses with an explicit reason and names
+   * the explicit entry, rather than silently spending the wait.
+   */
   searchTimeoutMs: number;
   /** Coverage-boost weight. Tuned on P2 and confirmed held out on P3. */
   searchW: number;  /** How far down the lexical ordering the coverage boost reaches. */

@@ -25,7 +25,7 @@ const ENTRY = process.argv[2] ?? join(REPO, 'dist', 'index.js');
 /** Specifiers that must never be reachable from the host entry. */
 const FORBIDDEN_PACKAGES = ['onnxruntime-web', 'onnxruntime-common', 'onnxruntime-node'];
 /** Files that only the worker subprocess may load. */
-const FORBIDDEN_FILES = new Set(['embed.js', 'worker.js']);
+const FORBIDDEN_FILES = new Set(['embed.js', 'worker.js', 'index-lock.js']);
 
 const SPECIFIER = /(?:^|[^\w$.])(?:import|export)\s*(?:[\s\S]*?\sfrom\s*)?['"]([^'"]+)['"]|import\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
 

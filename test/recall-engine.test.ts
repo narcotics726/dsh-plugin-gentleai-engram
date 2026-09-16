@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { RecallEngine, RebuildNeededError } from '../dist/recall/engine.js';
+import { RecallEngine } from '../dist/recall/engine.js';
+import { inspectIndex } from '../dist/recall/index-db.js';
 import { docText, fakeEmbedder, removeDir, tempDir, writeSource, type SourceRow } from './recall-support.ts';
 
 /**
@@ -80,7 +81,7 @@ async function engineWith(spec: ReadonlyArray<{ id: number; cos: number; type?: 
   };
 }
 
-test('[7.1] 换代后索引整体重建，而不是拿旧模型的向量作答', async () => {
+test('[3.1] 换代后的检索：限额内就地重建并作答；上限不足则当场拒绝且不动索引', async () => {
   const rows = rankedRows([{ id: 1, cos: 0.99 }]);
   const dir = tempDir();
   const dbPath = join(dir, 'source.db');
@@ -101,22 +102,30 @@ test('[7.1] 换代后索引整体重建，而不是拿旧模型的向量作答',
     await before.rebuild();
     before.close();
 
-    // The loaded bytes are fine and the source did not change — only the
-    // declared generation did. Answering from the old vectors here would be
-    // silent and permanent (new query vector vs old document vectors).
+    // A generation change is Δ = the whole corpus, so it goes through the SAME
+    // judgement as any delta: within the cap, the very same query rebuilds in
+    // place and answers. No external rebuild, no special case.
+    const payload = await after.query({ query: QUERY, limit: 1, project: 'alpha' }, { maxDocs: 10 });
+    assert.equal(payload.hits.length, 1);
+    assert.equal(payload.metering.mode, 'full');
+    after.close();
+
+    // With a cap that cannot fit the corpus, the same query declines the work
+    // and leaves the index exactly as it found it.
+    const denied = new RecallEngine({ ...options, identityDigest: '又一代' });
     await assert.rejects(
-      () => after.query({ query: QUERY, limit: 1, project: 'alpha' }),
-      (error: unknown) => {
-        assert.ok(error instanceof RebuildNeededError);
-        assert.match(error.message, /model-mismatch/);
+      () => denied.query({ query: QUERY, limit: 1, project: 'alpha' }, { maxDocs: 0 }),
+      (error: { kind?: string; mode?: string; pendingDocs?: number }) => {
+        assert.equal(error.kind, 'sync-needed');
+        assert.equal(error.mode, 'full');
+        assert.equal(error.pendingDocs, 1, '待处理量 = 语料条数');
         return true;
       },
     );
-
-    // The rebuild stamps the new generation, so the next query is answered.
-    await after.rebuild();
-    const payload = await after.query({ query: QUERY, limit: 1, project: 'alpha' });
-    assert.equal(payload.hits.length, 1);
+    denied.close();
+    // Untouched: the index still belongs to the rejected generation.
+    assert.equal(inspectIndex(indexPath, '这一代').needsFullBuild, false, '拒绝不得改动派生数据');
+    assert.equal(inspectIndex(indexPath, '又一代').needsFullBuild, true);
   } finally {
     before.close();
     after.close();
@@ -313,19 +322,26 @@ test('正本内容变化后紧接着的下一次检索可见，且只付增量�
   }
 });
 
-test('派生索引被删除或损坏时要求重建，重建后恢复', async () => {
+test('[3.1] 派生索引损坏：限额内当次自恢复；上限不足时以 sync-needed 拒绝，而不是运行时缺失', async () => {
   const f = await engineWith([{ id: 1, cos: 0.9 }]);
   try {
     const indexPath = join(f.dir, 'index.db');
     f.engine.close();
     writeFileSync(indexPath, 'not a database at all');
+
+    // Over the cap: refuse with the work judgement (NOT the runtime-missing
+    // path — the two must stay apart).
     await assert.rejects(
-      () => f.engine.query({ query: QUERY, limit: 10, project: 'alpha' }),
-      (error: { kind?: string }) => error.kind === 'rebuild-needed',
-      '派生数据损坏必须走重建，而不是报运行时缺失',
+      () => f.engine.query({ query: QUERY, limit: 10, project: 'alpha' }, { maxDocs: 0 }),
+      (error: { kind?: string; mode?: string }) => {
+        assert.equal(error.kind, 'sync-needed');
+        assert.equal(error.mode, 'full');
+        return true;
+      },
     );
-    await f.engine.rebuild();
-    const payload = await f.engine.query({ query: QUERY, limit: 10, project: 'alpha' });
+
+    // Within the cap: the same call rebuilds it and answers.
+    const payload = await f.engine.query({ query: QUERY, limit: 10, project: 'alpha' }, { maxDocs: 10 });
     assert.deepEqual(payload.hits.map((hit) => hit.id), [1]);
   } finally {
     f.cleanup();
@@ -346,7 +362,7 @@ test('记忆被删除后不再出现在结果里', async () => {
   }
 });
 
-test('dims/向量数不一致（孤立的向量缺失）时按需重建而不是静默算 0', async () => {
+test('[3.1] dims/向量数不一致（孤立的向量缺失）时按需重建而不是静默算 0', async () => {
   const f = await engineWith([{ id: 1, cos: 0.9 }, { id: 2, cos: 0.8 }]);
   try {
     const indexPath = join(f.dir, 'index.db');
@@ -355,13 +371,54 @@ test('dims/向量数不一致（孤立的向量缺失）时按需重建而不是
     const db = new DatabaseSync(indexPath);
     db.exec('DELETE FROM vectors WHERE doc_id=2');
     db.close();
-    await assert.rejects(
-      () => f.engine.query({ query: QUERY, limit: 10, project: 'alpha' }),
-      (error: { kind?: string }) => error.kind === 'rebuild-needed',
-    );
-    await f.engine.rebuild();
-    const payload = await f.engine.query({ query: QUERY, limit: 10, project: 'alpha' });
+    const payload = await f.engine.query({ query: QUERY, limit: 10, project: 'alpha' }, { maxDocs: 10 });
     assert.equal(payload.hits.length, 2);
+    assert.equal(payload.metering.mode, 'full', '不一致即全量，且就在这次调用里完成');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('[3.1] 索引文件被删除：限额内当次自恢复（删数据 = Δ 全量）', async () => {
+  const f = await engineWith([{ id: 1, cos: 0.9 }]);
+  try {
+    const indexPath = join(f.dir, 'index.db');
+    f.engine.close();
+    rmSync(indexPath, { force: true });
+    const payload = await f.engine.query({ query: QUERY, limit: 10, project: 'alpha' }, { maxDocs: 10 });
+    assert.deepEqual(payload.hits.map((hit) => hit.id), [1]);
+    assert.equal(payload.metering.mode, 'full');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('[3.2] 同一个判定既覆盖增量也覆盖重建：超限拒绝两次结果一致，且不改变索引', async () => {
+  const f = await engineWith([
+    { id: 1, cos: 0.9 },
+    { id: 2, cos: 0.8 },
+  ]);
+  try {
+    const indexPath = join(f.dir, 'index.db');
+    const generation = inspectIndex(indexPath).storedHash;
+    writeSource(join(f.dir, 'source.db'), [
+      { id: 1, title: 't1', content: 'c1' },
+      { id: 2, title: 't2', content: 'c2' },
+      { id: 3, title: 't3', content: 'c3' },
+      { id: 4, title: 't4', content: 'c4' },
+    ]);
+    for (const attempt of [1, 2]) {
+      await assert.rejects(
+        () => f.engine.query({ query: QUERY, limit: 10, project: 'alpha' }, { maxDocs: 1 }),
+        (error: { kind?: string; mode?: string; pendingDocs?: number }) => {
+          assert.equal(error.kind, 'sync-needed', `第 ${attempt} 次拒绝`);
+          assert.equal(error.mode, 'incremental');
+          assert.equal(error.pendingDocs, 2, '两条变化（新增 2 条）');
+          return true;
+        },
+      );
+      assert.equal(inspectIndex(indexPath).storedHash, generation, '重复拒绝不得改动派生数据');
+    }
   } finally {
     f.cleanup();
   }

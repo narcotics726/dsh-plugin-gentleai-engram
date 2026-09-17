@@ -30,9 +30,7 @@ related:
 
 ## Purpose
 压缩会丢弃会话历史：本能力把压缩摘要持久化到 engram，并在压缩完成后把最近的相关记忆重新提供给模型，使压缩之后的对话仍然带着记忆继续。
-
 ## Requirements
-
 ### Requirement: 压缩摘要持久化
 插件 SHALL 在收到 `compaction/summary` 事件时，把该事件携带的摘要内容提交给 engram 的会话摘要入口并归属当前会话；插件 SHALL NOT 自行生成摘要文本。
 
@@ -124,11 +122,15 @@ related:
 - **THEN** 该消息由 dsh 写入，插件未插入或改写任何会话事件
 
 ### Requirement: 压缩恢复开关
-`compactionRecovery` 为 false 时，插件 SHALL NOT 写入摘要、SHALL NOT 注入上下文。
+`compactionRecovery` 为 false 时，插件 SHALL NOT 写入摘要、SHALL NOT 注入上下文，且插件自带的协议文本 SHALL NOT 要求模型自己完成这两件事——关闭即完全关闭，本行为只有这一个所有者。
 
 #### Scenario: 关闭压缩恢复
 - **WHEN** `compactionRecovery` 为 false 且发生压缩
 - **THEN** engram 中该会话 summary 不变，模型侧无注入
+
+#### Scenario: 关闭时模型侧的文本也不兜底
+- **WHEN** `compactionRecovery` 为 false，读取插件自带的两份协议文本（常驻触发段与按需加载的流程技能）
+- **THEN** 两份文本里都没有要求模型在压缩后自行补写摘要或恢复上下文的义务
 
 ### Requirement: 压缩恢复失败不阻断回合
 摘要写入或上下文注入失败 SHALL NOT 阻断回合，SHALL NOT 改变用户可见回复。
@@ -146,3 +148,4 @@ related:
 #### Scenario: 空摘要
 - **WHEN** 收到 `compaction/summary` 且其摘要文本为空（空数组或不含 text 块）
 - **THEN** engram 中不出现该会话的摘要写入，日志中出现一条带 `compactionId` 的 warn 级记录，且该次压缩后续的 `compaction/end` 仍按正常路径处理
+

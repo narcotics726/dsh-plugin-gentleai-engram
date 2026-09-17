@@ -72,7 +72,7 @@ HOME="$PROBE_HOME" engram mcp    # engram 需在 PATH 上（或写它的绝对�
 
 复测四项（详见 `docs/event-findings.md`）：中止回合是否触发 `agent/turn-stopping`、`agent/created` 窗口能否 `restrict`、`session-start` 的 source 集合、`session-start` 是否先于首个回合。
 
-再补五条（1–2 于 2026-09-10 由 `engram-bridge-p0-fixes` 补入，3 被 `engram-bridge-recall-delivery` 改写，4–5 由后者新增；判据见 `docs/event-findings.md` 的「Session-event envelope anchors」）：
+再补八条（1–2 于 2026-09-10 由 `engram-bridge-p0-fixes` 补入，3 被 `engram-bridge-recall-delivery` 改写，4–5 由后者新增，6 由 `engram-protocol-hosting` 新增，7–8 由 `engram-protocol-rollout` 新增；判据见 `docs/event-findings.md` 的「Session-event envelope anchors」）：
 
 1. **会话事件仍是信封**：随机解压一个会话日志，确认 `assistant/message` 事件的 key 集合仍含 `data`（而不是把 `turn`/`message` 平铺到顶层）。若宿主改变该形状，插件会以一条 warn（每会话每事件类型一条）暴露，而不是静默失效。
 2. **工具面声明的规模**（2026-09-17 改写 —— 旧判据用了**已被宿主删掉的字段**）：判据不再是 `request/header.data.header.system`：`dsh-session` 0.1.5 的 `EpochHeader` 只剩 `config` / `adapterDefaults` / `tools`（0.1.2 才有 `system?: string`），而且 `request/header` 只在 header **变化**时追加——本机实测一个 66 step 的会话只有 **1 条**，所以它本来就不是「每次请求都有」的东西。改判据：读 `system/message` 事件的正文（渲染后的系统提示词，本机实测每会话 1 条），或在没有会话日志时直接以 `$DSH_HOME/storages/engram-bridge/tools.json` 的声明数为准；被动捕获工具不注册，所以模型可见的工具名数是声明数 **减 1**。`data.header.tools` 在 web/ptc 档只有 `run_code`，不能当判据。
@@ -88,6 +88,8 @@ HOME="$PROBE_HOME" engram mcp    # engram 需在 PATH 上（或写它的绝对�
    - **为什么必须复测**：宿主允许 order 重复且**不报错**——同号只按 name 的 code-unit 排序。第一方或第三方往 `(0, 500)` 里插值时，插件那一段的位置会**静默**改变，只有这条断言能发现。
    - **同一次探针还能看到另外两个信号**：`system/message` 的 `markerCount` 在**主会话**为 1、在**子 agent 会话**为 0（子 agent 没有 engram 工具，不该收到这段义务；`assemble` 记录里该段 `chars` 也是 0）；技能目录那条 `user/message`（`source: skill-catalog`）里出现技能描述。
    - 用法：`PROBE_WITH_BRIDGE=1 PROBE_MARKER='不等用户开口' ./scripts/probe/run-probe.sh <name> protocol '<task>'`（`PROBE_WITH_BRIDGE=1` 才会把本插件挂进 throwaway profile；后端指向仓库的 stub，且关掉被动捕获与压缩恢复，不会写真库）。
+7. **`scope` 的取值档数**（`engram-protocol-rollout` 新增，2026-09-17 实测）：在用 engram **1.20.0** 自己的说明是**两档**（`Filter by scope: project (default) or personal`、`New scope: project or personal`），二进制里**没有** `or global`；三档（`project, personal, or global`）只出现在**上游 main** 的 tool schema 里。CLI 对 `--scope` 不做取值校验（`--scope bogus` 也照存）。协议文本写两档与**在用版本**一致，不是漂移。**升级 engram 后复测**：若已支持 `global`，再决定是否写进协议文本；拿上游 HEAD 当基线会得出错误的"漂移"结论。
+8. **同名技能共存时谁胜出**（`engram-protocol-rollout` 新增，2026-09-17 实测）：**文件技能压住插件自带的 runtime 技能**。实测：真实 home 里 `~/.dsh/skills/engram-memory/SKILL.md` 与插件注册的 runtime 技能同时存在时，技能目录给出的是**文件那份**的描述（插件那份不出现）；删掉文件后目录才切换为插件那份。因此"删掉使用者机器上的手抄件"不是清理，而是**托管文本真正生效的前提**。复测方式：同时放两份，看目录给谁。
 
 ## 6. 端到端
 

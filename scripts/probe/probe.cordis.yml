@@ -12,6 +12,7 @@
 # Tokens (written here spaced so this comment survives rendering):
 #   @@ PROBE_PLUGIN_MODULE @@   @@ PROBE_OUT @@        @@ PROBE_SCENARIO @@
 #   @@ PROBE_DENY @@            @@ PROBE_ABORT_AFTER_CHARS @@   @@ PROBE_LLM_MODULE @@
+#   @@ PROBE_MARKER @@  substring counted inside the rendered system prompt
 - insert:
     - id: probe-events
       name: "@@PROBE_PLUGIN_MODULE@@"
@@ -20,4 +21,5 @@
         scenario: "@@PROBE_SCENARIO@@"
         deny: "@@PROBE_DENY@@"
         abortAfterChars: "@@PROBE_ABORT_AFTER_CHARS@@"
+        marker: "@@PROBE_MARKER@@"
         llmModule: "@@PROBE_LLM_MODULE@@"

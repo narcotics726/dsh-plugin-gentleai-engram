@@ -9,6 +9,8 @@
 #   PROBE_KEEP_HOME=1   keep the throwaway DSH home for inspection
 #   PROBE_EXTRA_PATCHES extra --patch overlays, space separated (e.g. probe-compact.cordis.yml)
 #   PROBE_LLM_MODULE   override the resolved @deepseek-ai/dsh-llm entry path
+#   PROBE_WITH_BRIDGE=1  also mount this repository's built bridge (dist/index.js)
+#   PROBE_MARKER       substring whose occurrence count is recorded per system/message
 #
 # The runner exports PROBE_PLUGIN_MODULE / PROBE_LLM_MODULE (absolute paths) for
 # probe.cordis.yml; the checked-in overlay itself holds no local path.
@@ -40,6 +42,12 @@ if [ -z "${PROBE_LLM_MODULE:-}" ]; then
   fi
 fi
 export PROBE_LLM_MODULE="${PROBE_LLM_MODULE:-}"
+
+# Tokens for the optional bridge overlay. The stub keeps a probe run out of the
+# real memory database.
+export PROBE_BRIDGE_MODULE="$REPO/dist/index.js"
+export PROBE_NODE="$(command -v node)"
+export PROBE_STUB="$REPO/test/engram-stub.mjs"
 
 RUN_NAME="${1:?usage: run-probe.sh <run-name> <scenario> \"<task>\"}"
 SCENARIO="${2:?scenario required, e.g. observe|abort|restrict}"
@@ -89,12 +97,23 @@ render_overlay() {
       -e "s|@@PROBE_SCENARIO@@|$PROBE_SCENARIO|g" \
       -e "s|@@PROBE_DENY@@|${PROBE_DENY:-}|g" \
       -e "s|@@PROBE_ABORT_AFTER_CHARS@@|${PROBE_ABORT_AFTER_CHARS:-8}|g" \
+      -e "s|@@PROBE_MARKER@@|${PROBE_MARKER:-}|g" \
+      -e "s|@@PROBE_BRIDGE_MODULE@@|${PROBE_BRIDGE_MODULE:-}|g" \
+      -e "s|@@PROBE_NODE@@|${PROBE_NODE:-}|g" \
+      -e "s|@@PROBE_STUB@@|${PROBE_STUB:-}|g" \
       -e "s|@@PROBE_LLM_MODULE@@|${PROBE_LLM_MODULE:-}|g" \
       "$src" > "$dst"
 }
 
 render_overlay "$REPO/scripts/probe/probe.cordis.yml" "$RENDER_DIR/probe.cordis.yml"
 PATCH_ARGS=(--patch "$RENDER_DIR/probe.cordis.yml")
+
+# Optional: mount the bridge under test. Off by default so the existing event
+# probes keep observing a bare base+headless profile.
+if [ "${PROBE_WITH_BRIDGE:-0}" = "1" ]; then
+  render_overlay "$REPO/scripts/probe/probe-bridge.cordis.yml" "$RENDER_DIR/probe-bridge.cordis.yml"
+  PATCH_ARGS+=(--patch "$RENDER_DIR/probe-bridge.cordis.yml")
+fi
 for extra in ${PROBE_EXTRA_PATCHES:-}; do
   case "$extra" in /*) src="$extra" ;; *) src="$REPO/scripts/probe/$extra" ;; esac
   dst="$RENDER_DIR/$(basename "$src")"

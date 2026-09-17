@@ -76,18 +76,23 @@ function fakeHost(options: { withCommands?: boolean } = {}): FakeHost {
   };
   if (options.withCommands === true) {
     // Optional service injection, as cordis does it: the child context only
-    // exists when the service does.
+    // exists when the service does. The optional services this plugin uses are
+    // a CLOSED SET; `commands` is the one this rig provides, and the protocol
+    // services stay absent so their registrations take the no-service path.
+    const OPTIONAL_SERVICES = ['commands', 'skills', 'systemPrompt'];
     ctx.inject = (deps: readonly string[], callback: (ctx: unknown) => void): void => {
-      assert.deepEqual([...deps], ['commands']);
-      const child: Record<string, unknown> = {
-        ...ctx,
-        commands: {
+      for (const dep of deps) {
+        assert.ok(OPTIONAL_SERVICES.includes(dep), `unexpected optional injection: ${dep}`);
+      }
+      const child: Record<string, unknown> = { ...ctx };
+      if (deps.includes('commands')) {
+        child.commands = {
           register(definition: { name: string; description: string; recordInput?: boolean }): () => void {
             commands.push(definition);
             return () => {};
           },
-        },
-      };
+        };
+      }
       callback(child);
     };
   }

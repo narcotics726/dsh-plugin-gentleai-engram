@@ -1,0 +1,23 @@
+# Opt-in overlay: mount the bridge under test into the throwaway probe profile.
+# Rendered by run-probe.sh ONLY when PROBE_WITH_BRIDGE=1.
+#
+# The entry names the bridge's BUILT entry by absolute path — the same mechanism
+# probe-events.mjs already uses — so the throwaway home needs no dependency
+# install. Without this the headless profile is base+headless only, and NO
+# protocol section exists to observe at all.
+#
+# The backend is the repository's own stub, and passive capture / compaction
+# recovery are off: a probe run must never write the real memory database.
+#
+# Tokens: @@ PROBE_BRIDGE_MODULE @@  @@ PROBE_NODE @@  @@ PROBE_STUB @@
+- insert:
+    - id: engram-bridge
+      name: "@@PROBE_BRIDGE_MODULE@@"
+      config:
+        command: "@@PROBE_NODE@@"
+        args:
+          - "@@PROBE_STUB@@"
+        capturePassive: false
+        compactionRecovery: false
+        recallWakeup: false
+        searchEnabled: false

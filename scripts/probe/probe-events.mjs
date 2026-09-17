@@ -42,6 +42,10 @@ export function apply(ctx, config) {
     .map((s) => s.trim())
     .filter(Boolean)
   const abortAfterChars = Number(config.abortAfterChars ?? 8)
+  // Substring whose occurrence count in the rendered system prompt is recorded.
+  // The prompt is far too large to commit, and "appears exactly once" is the
+  // observable this probe exists for (deliverable.txt: protocol-hosting).
+  const marker = String(config.marker ?? '')
 
   mkdirSync(dirname(out), { recursive: true })
 
@@ -272,6 +276,38 @@ export function apply(ctx, config) {
     write({ ev: 'agent', type: 'agent/disposed', sid: sidOf(agent) })
   })
 
+  // Section ORDER is a verification surface, not a runtime dependency: the host
+  // permits duplicate orders and only breaks ties by name, silently. A section
+  // landing on the plugin's number would therefore be invisible without this.
+  ctx.on('system-prompt/assemble', async (assembly, context, next) => {
+    const result = await next()
+    const header = headerOf(context?.agent)
+    const names = Array.isArray(result?.sections) ? result.sections.map((s) => s.name) : null
+    // Self-describing placement: a section's neighbours are what the plugin's
+    // literal order has to be checked against, and only the probe can see them.
+    const placed = names === null ? null : names
+      .map((name, index) => ({ name, index }))
+      .filter((entry) => entry.name.startsWith('engram:'))
+      .map((entry) => ({
+        name: entry.name,
+        index: entry.index,
+        before: entry.index === 0 ? null : names[entry.index - 1],
+        after: entry.index + 1 >= names.length ? null : names[entry.index + 1],
+        // Empty contributions stay in the assembled list and only disappear at
+        // render time, so a name being present says nothing about whether the
+        // section contributed text. A sub-agent must show 0 here.
+        chars: String(result.sections[entry.index]?.text ?? '').length,
+      }))
+    write({
+      ev: 'assemble',
+      sid: context?.agent === undefined ? null : sidOf(context.agent),
+      origin: header.origin ?? null,
+      sections: names,
+      placed,
+    })
+    return result
+  })
+
   const KEEP = new Set([
     'turn/start',
     'turn/end',
@@ -282,6 +318,7 @@ export function apply(ctx, config) {
     'tool/call',
     'tool/result',
     'request/header',
+    'system/message',
     'compaction/start',
     'compaction/summary',
     'compaction/end',
@@ -454,6 +491,20 @@ export function apply(ctx, config) {
           : null
         record.usage = data.usage ?? null
         break
+      case 'system/message': {
+        // 0.1.5 moved the rendered prompt out of `request/header` (EpochHeader
+        // lost its `system` field) and into this durable derived-history node.
+        const text = Array.isArray(data.message?.content)
+          ? data.message.content
+              .filter((b) => b.type === 'text')
+              .map((b) => b.text)
+              .join('')
+          : ''
+        record.keys = Object.keys(data)
+        record.textChars = text.length
+        record.markerCount = marker === '' ? null : text.split(marker).length - 1
+        break
+      }
       case 'request/header':
         record.reason = data.reason ?? null
         record.tools = Array.isArray(data.header?.tools) ? data.header.tools.map((t) => t.name) : null
@@ -467,16 +518,20 @@ export function apply(ctx, config) {
         record.name = data.name ?? null
         record.isError = data.isError ?? null
         break
-      case 'user/message':
+      case 'user/message': {
         record.source = data.source?.kind ?? null
-        record.text = Array.isArray(data.content)
+        const text = Array.isArray(data.content)
           ? data.content
               .filter((b) => b.type === 'text')
               .map((b) => b.text)
               .join('')
-              .slice(0, 120)
-          : null
+          : ''
+        record.text = text.slice(0, 120)
+        // The skill catalog is a user-role message, so a marker aimed at the
+        // skill description is observable here and nowhere else.
+        record.markerCount = marker === '' ? null : text.split(marker).length - 1
         break
+      }
       case 'compaction/start':
       case 'compaction/summary':
       case 'compaction/end':

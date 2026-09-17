@@ -25,7 +25,8 @@ context: |
   与备份）、不接管云同步。
 
   约束：不新增 dsh 会话事件类型（未标记的未知事件类型会让会话日志报
-  SessionFormatUnsupportedError）；P0 不新增 system prompt 段（KV cache）。
+  SessionFormatUnsupportedError）；常驻的协议文本是一段**静态**的系统提示词段
+  （内容随插件版本走、逐回合恒定；子 agent 拿空段）。
 
 rules:
   proposal:

@@ -1,6 +1,11 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+// Type-only: importing dsh-agent is what loads its `AssembleContext.agent`
+// augmentation. `tsc` erases it, so it never reaches the host import closure.
+import type { Agent } from '@deepseek-ai/dsh-agent';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
+import type { SkillRegistration } from '@deepseek-ai/dsh-skill';
+import type { AssembleContext, PromptSection } from '@deepseek-ai/dsh-system-prompt';
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
 import { SessionBindings, type Binding } from './bindings.js';
 import { PassiveCapture } from './capture.js';
@@ -17,6 +22,7 @@ import { blocksToText, EventShapeWarnings, readEventPayload, turnFinalText, type
 import { errorMessage, loggerFrom, type Logger } from './log.js';
 import { McpClient, type McpCallResult, type McpToolDeclaration } from './mcp-client.js';
 import { ConnectionPool } from './pool.js';
+import { loadProtocolAssets, PROTOCOL_SECTION_NAME, PROTOCOL_SECTION_ORDER } from './protocol.js';
 import type { CommandDefinition } from '@deepseek-ai/dsh-commands';
 import { RecallProcessManager, RecallUnavailableError, ONESHOT_TIMEOUT_MS } from './recall/process.js';
 import type { ExpectedIdentity } from './recall/model-expected.js';
@@ -69,6 +75,13 @@ interface PluginContext {
    */
   inject?(deps: readonly string[], callback: (ctx: PluginContext) => void): unknown;
   commands?: { register(definition: CommandDefinition): () => void };
+  /**
+   * Optional for the same reason as `commands`: mounting is an enhancement, and
+   * putting either in the plugin's own `inject` would take the whole bridge down
+   * in a profile that does not provide it.
+   */
+  systemPrompt?: { section(section: PromptSection): () => void };
+  skills?: { register(skill: SkillRegistration): () => void };
 }
 
 /**
@@ -89,6 +102,26 @@ export function apply(ctx: PluginContext, config: EngramConfig, deps: PluginDeps
   const log: Logger = loggerFrom(ctx);
   const shapeWarnings = new EventShapeWarnings((message) => log.warn(message));
   const envProject = typeof process.env.ENGRAM_PROJECT === 'string' ? process.env.ENGRAM_PROJECT : undefined;
+  // Read here, never at module scope: reading files is a process-level side
+  // effect and every contribution of this plugin is ctx-owned (hard rule 2). A
+  // missing asset is a packaging error, so it fails the load (hard rule 4).
+  const protocol = loadProtocolAssets();
+
+  /**
+   * The section renders for EVERY assembly, including sub-agents — and a
+   * sub-agent has no engram tools (`guardEngramTools` denies them at dispatch,
+   * `shadowEngramTools` hides them from the catalog). Text telling an agent what
+   * it owes would be an obligation it cannot fulfil, so it contributes nothing
+   * there; the host drops empty sections. The predicate is the same one the
+   * tool-surface restriction uses, so the two halves cannot drift.
+   */
+  const sectionText = (context: AssembleContext): string => {
+    // `session` is added to Agent by the loop, not by dsh-agent, so the plugin's
+    // own structural AgentLike is what actually reads the header.
+    const agent = context.agent as (Agent & AgentLike) | undefined;
+    return isSubagentSession(agent?.session?.header) ? '' : protocol.resident;
+  };
+
   const registeredNames = new Set<string>();
   const agents = new Map<string, AgentLike>();
   let toolsRegistered = false;
@@ -191,6 +224,44 @@ export function apply(ctx: PluginContext, config: EngramConfig, deps: PluginDeps
     // Optional capability absent: the bridge is fully functional, it just has no
     // operator command. Not a warning — a host without the registry is legal.
     log.debug('宿主没有 commands 注入点：操作者命令未注册（其余能力不受影响）');
+  }
+
+  // The protocol text: the resident trigger block as a system prompt section,
+  // and the full procedure as a skill loaded on demand. Both ship with the
+  // plugin, so no user-machine file has to exist for the model to be told what
+  // it owes engram (spec: 义务的告知随插件分发).
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['systemPrompt'], (promptCtx) => {
+      const systemPrompt = promptCtx.systemPrompt;
+      if (systemPrompt === undefined) return;
+      promptCtx.effect(
+        () =>
+          systemPrompt.section({
+            name: PROTOCOL_SECTION_NAME,
+            order: PROTOCOL_SECTION_ORDER,
+            text: sectionText,
+          }),
+        'engram-bridge.protocol-section',
+      );
+    });
+    ctx.inject(['skills'], (skillCtx) => {
+      const skills = skillCtx.skills;
+      if (skills === undefined) return;
+      skillCtx.effect(
+        () =>
+          skills.register({
+            name: protocol.skill.name,
+            description: protocol.skill.description,
+            // Required — only `invocation` and `provider` carry defaults — and
+            // it is the origin the session catalog shows.
+            source: 'runtime',
+            content: protocol.skill.content,
+          }),
+        'engram-bridge.protocol-skill',
+      );
+    });
+  } else {
+    log.debug('宿主没有 inject 注入点：协议文本未注册（其余能力不受影响）');
   }
 
   let disposers: Array<() => void> = [];

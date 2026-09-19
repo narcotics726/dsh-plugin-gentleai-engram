@@ -15,19 +15,42 @@ import {
   defaultSearchDbPath,
   defaultSearchIndexDir,
   defaultSearchModelDir,
+  writeLayerSettings,
   type Config as EngramConfig,
+  type WriteLayerConfig,
 } from './config.js';
 import { applyInjection, chooseProject, type InjectionInputs } from './injection.js';
+import { SaveInstruments } from './instruments.js';
+import { checkProtocolTools } from './protocol-consistency.js';
 import { blocksToText, EventShapeWarnings, readEventPayload, turnFinalText, type SessionEventLike } from './host-events.js';
 import { errorMessage, loggerFrom, type Logger } from './log.js';
 import { McpClient, type McpCallResult, type McpToolDeclaration } from './mcp-client.js';
 import { ConnectionPool } from './pool.js';
 import { loadProtocolAssets, PROTOCOL_SECTION_NAME, PROTOCOL_SECTION_ORDER } from './protocol.js';
 import type { CommandDefinition } from '@deepseek-ai/dsh-commands';
-import { RecallProcessManager, RecallUnavailableError, ONESHOT_TIMEOUT_MS } from './recall/process.js';
+import { RecallProcessManager, RecallUnavailableError, ONESHOT_TIMEOUT_MS, EMPTY_CANDIDATE_PAYLOAD } from './recall/process.js';
 import type { ExpectedIdentity } from './recall/model-expected.js';
-import type { RecallPayload, RecallQuery } from './recall/protocol.js';
+import type { CandidatePayload, RecallPayload, RecallQuery } from './recall/protocol.js';
 import { buildRecallCommandDefinition } from './recall-command.js';
+import { parseFallbackOutcome } from './save/fallback.js';
+import {
+  normalizeSaveParams,
+  SaveInputError,
+  toCandidateQuery,
+  toFallbackArgs,
+  toWriteBody,
+  type SaveParams,
+  type SaveTarget,
+} from './save/params.js';
+import { WriteFailure, writeObservation } from './save/write-client.js';
+import {
+  buildSaveToolDefinition,
+  REPLACED_SAVE_TOOL,
+  SAVE_INPUT_SCHEMA,
+  SAVE_TOOL_NAME,
+  saveToolTimeoutMs,
+  type SaveResult,
+} from './save-tool.js';
 import {
   buildRecallSyncToolDefinition,
   buildRecallToolDefinition,
@@ -38,7 +61,7 @@ import {
 } from './recall-tool.js';
 import { guardEngramTools, isSubagentSession, shadowEngramTools, TOOL_PREFIX } from './subagent.js';
 import { readToolCache, sameToolSurface, toolCacheFingerprint, toolCachePath, writeToolCache } from './tool-cache.js';
-import { buildToolDefinitions, siteOf, type ToolCallSite } from './tools.js';
+import { buildToolDefinitions, siteOf, UNREGISTERED_ENGRAM_TOOLS, type ToolCallSite } from './tools.js';
 
 export { Config };
 export type { EngramConfig };
@@ -106,6 +129,9 @@ export function apply(ctx: PluginContext, config: EngramConfig, deps: PluginDeps
   // effect and every contribution of this plugin is ctx-owned (hard rule 2). A
   // missing asset is a packaging error, so it fails the load (hard rule 4).
   const protocol = loadProtocolAssets();
+  // Write-layer settings, with the schema defaults applied for a directly
+  // constructed config (tests, embedders) that omits them (hard rule 5).
+  const writeLayer: WriteLayerConfig = writeLayerSettings(config);
 
   /**
    * The section renders for EVERY assembly, including sub-agents — and a
@@ -124,6 +150,7 @@ export function apply(ctx: PluginContext, config: EngramConfig, deps: PluginDeps
 
   const registeredNames = new Set<string>();
   const agents = new Map<string, AgentLike>();
+  const instruments = new SaveInstruments();
   let toolsRegistered = false;
   let degradedLogged = false;
 
@@ -302,12 +329,48 @@ export function apply(ctx: PluginContext, config: EngramConfig, deps: PluginDeps
     });
     registeredNames.add(syncDefinition.name);
     disposers.push(ctx.tools.register(syncDefinition));
+    // The save entry shares the same lifecycle. Its declared timeout is derived
+    // from the worst path (candidates + write + fallback + margin) because the
+    // host's timeout policy is the enforcer and cannot be beaten after the fact
+    // (design D13).
+    const saveDefinition = buildSaveToolDefinition({
+      timeoutMs: saveToolTimeoutMs(writeLayer),
+      run: runSave,
+    });
+    registeredNames.add(saveDefinition.name);
+    disposers.push(ctx.tools.register(saveDefinition));
+    warnOnProtocolSurfaceDrift(declarations);
     log.info(`registered ${registeredNames.size} engram tools (${origin})`);
     // Registration can finish after a sub-agent was created: at creation time there were no
     // names to deny, so the visibility restriction has to be re-applied now.
     for (const agent of agents.values()) {
       if (isSubagentSession(agent.session?.header)) shadowEngramTools(agent as never, [...registeredNames], log);
     }
+  };
+
+  /**
+   * Is the shipped protocol text asking for tools that are on this surface?
+   *
+   * Advisory on purpose: a mismatch between the text and the surface is a real
+   * obligation gap, but it is discovered after registration and must not take the
+   * bridge down. The wording rule (an unregistered name must be marked as such)
+   * is what keeps "explaining the gap" and "issuing an instruction" apart; the
+   * repository's test suite enforces the same check on the packaged assets.
+   */
+  const warnOnProtocolSurfaceDrift = (declarations: readonly McpToolDeclaration[]): void => {
+    const visible = [
+      ...declarations
+        .filter((declaration) => !UNREGISTERED_ENGRAM_TOOLS.includes(declaration.name))
+        .map((declaration) => `${TOOL_PREFIX}${declaration.name}`),
+      ...registeredNames,
+    ];
+    const violations = [
+      ...checkProtocolTools(protocol.resident, { visible }),
+      ...checkProtocolTools(protocol.skill.content, { visible }),
+    ];
+    if (violations.length === 0) return;
+    const detail = violations.map((violation) => `${violation.name}(第 ${violation.line} 行)`).join('、');
+    log.warn(`协议文本里有工具名与当前工具面不一致：${detail}`);
   };
 
   const callOnWorkspace = async (
@@ -359,7 +422,62 @@ export function apply(ctx: PluginContext, config: EngramConfig, deps: PluginDeps
       // The bridge owns session identity; never let the model rebind it.
       finalArgs.id = site.sessionId;
     }
+    assertNotSelfRelation(declaration.name, finalArgs);
+    // Instruments (design D9.4/D9.5): log-only, session-scoped, in memory. They
+    // answer two questions that are otherwise unanswerable — did the model read a
+    // candidate's full text before judging it, and how do its verdicts distribute.
+    noteInstrumentedCall(site.sessionId, declaration.name, finalArgs);
     return await callOnWorkspace(site.workspace, declaration.name, finalArgs, signal);
+  }
+
+  /**
+   * Refuse a relation write whose two ends are the same memory.
+   *
+   * The backend has no self-relation protection, so `mem_compare(a, a)` would
+   * write a row that is true by construction and useless to every consumer — and
+   * it is reachable precisely in the branch this change introduces (when a save
+   * updates an existing row, the id it returns and the candidate's id are the
+   * same). The refusal happens BEFORE forwarding, so nothing reaches the backend
+   * (spec: 自反关系被挡在门外).
+   */
+  function assertNotSelfRelation(toolName: string, args: Record<string, unknown>): void {
+    if (toolName !== 'mem_compare') return;
+    const a = Number(args.memory_id_a);
+    const b = Number(args.memory_id_b);
+    if (!Number.isFinite(a) || !Number.isFinite(b) || a !== b) return;
+    throw new Error(
+      `engram-bridge: 关系写入的两个标识取自同一条记忆（#${a}），本次请求已被拒绝，后端不会写出自反行。` +
+        '保存结果里写着「本次将更新它」时就是这种情况：那一对不构成可写的关系。',
+    );
+  }
+
+  /**
+   * Record what a model-issued engram call tells us about its own behaviour.
+   *
+   * `mem_compare` (the pair path the protocol teaches) carries both observation
+   * ids, so "was this judged blind" is answerable. `mem_judge` carries only a
+   * relation id, and nothing maps that back to a pair — claiming blindness there
+   * would be inventing evidence, so its verdict is counted without a read-first
+   * determination.
+   */
+  function noteInstrumentedCall(
+    sessionId: string,
+    toolName: string,
+    args: Record<string, unknown>,
+  ): void {
+    if (toolName === 'mem_get_observation') {
+      const id = Number(args.id);
+      if (Number.isFinite(id)) instruments.noteObservationRead(sessionId, id);
+      return;
+    }
+    if (toolName !== 'mem_judge' && toolName !== 'mem_compare') return;
+    const verb = typeof args.relation === 'string' && args.relation !== '' ? args.relation : 'unknown';
+    const ids =
+      toolName === 'mem_compare'
+        ? [Number(args.memory_id_a), Number(args.memory_id_b)].filter((id) => Number.isFinite(id))
+        : undefined;
+    const verdict = instruments.noteVerdict(sessionId, verb, ids);
+    log.info(instruments.verdictLine(sessionId, verdict));
   }
 
   /**
@@ -428,11 +546,15 @@ export function apply(ctx: PluginContext, config: EngramConfig, deps: PluginDeps
           '为保持"默认只返回当前项目"，本次检索被拒绝。两条出路：显式传 project，或传 all_projects: true 明确跨项目。',
       );
     }
-    return await recallManager.query({
+    const payload = await recallManager.query({
       ...request,
       project,
       ...(wantsAll ? { allProjects: true } : {}),
     });
+    // Instrument input only (design D9.4): the ids this session was shown, so a
+    // later candidate pool can be compared against what the model has just read.
+    instruments.noteSeen(site.sessionId, payload.hits.map((hit) => hit.id));
+    return payload;
   }
 
   /**
@@ -442,6 +564,213 @@ export function apply(ctx: PluginContext, config: EngramConfig, deps: PluginDeps
   async function runRecallSync(_exec: { agent?: unknown; signal?: AbortSignal }): Promise<string> {
     assertModelFacingEnabled();
     return await recallManager.catchUp();
+  }
+
+  /**
+   * The bridge's own save entry point (design D1/D14).
+   *
+   * Order is the contract: normalise once → resolve identity through the SAME
+   * injection the engram tools use → compute candidates BEFORE the write → write
+   * (HTTP surface, fallback on unreachability) → mark what the write updated by
+   * comparing the returned id. Candidates never gate the write: their own short
+   * budget, and any failure is "no candidates this time".
+   */
+  const saveDeclaration: McpToolDeclaration = {
+    name: SAVE_TOOL_NAME.startsWith(TOOL_PREFIX) ? SAVE_TOOL_NAME.slice(TOOL_PREFIX.length) : SAVE_TOOL_NAME,
+    inputSchema: SAVE_INPUT_SCHEMA as McpToolDeclaration['inputSchema'],
+  };
+
+  /** The refusal when identity cannot be established at all. Nothing is written. */
+  function saveTargetRefusal(what: 'session_id' | 'project', closedSwitch: boolean): Error {
+    const label = what === 'project' ? '项目' : '会话标识';
+    const knob = what === 'project' ? 'injectSessionProject' : 'injectSessionId';
+    const head = closedSwitch
+      ? `${label}注入已关闭（${knob}=false），且本次调用没有显式传 ${what}`
+      : `${label}无从判定（会话${label}尚未解析出，也没有 projectOverrides / ENGRAM_PROJECT）`;
+    const outs =
+      what === 'project'
+        ? '两条出路：显式传 project，或把项目取值链配好（打开 injectSessionProject / 配 projectOverrides / 设 ENGRAM_PROJECT）'
+        : '两条出路：显式传 session_id，或打开 injectSessionId';
+    return new Error(`engram-bridge: ${head}，无法给这条记忆一个归属。本次没有写入任何记忆。${outs}。`);
+  }
+
+  async function runSave(
+    rawArgs: Record<string, unknown>,
+    exec: { agent?: unknown; signal?: AbortSignal },
+  ): Promise<SaveResult> {
+    // Normalise FIRST, so both write paths emit byte-identical fields (design D1).
+    const params: SaveParams = normalizeSaveParams(rawArgs);
+    const site = siteOf(exec as { agent?: unknown });
+    const binding: Binding = await bindings.ensure(site.sessionId, site.workspace);
+
+    // An empty string is not an explicit value: same rule the retrieval entry
+    // uses, so "the model passed an empty project" cannot silently disable
+    // injection and then fall through to an unattributed write.
+    const explicit: Record<string, unknown> = { ...rawArgs };
+    for (const key of ['session_id', 'project']) {
+      if (explicit[key] === '') delete explicit[key];
+    }
+    const injected = applyInjection(
+      saveDeclaration,
+      { ...explicit, title: params.title, content: params.content, type: params.type },
+      injectionInputs(site, binding.project),
+    );
+    const sessionId = typeof injected.session_id === 'string' ? injected.session_id : '';
+    if (sessionId === '') {
+      throw saveTargetRefusal('session_id', config.injectSessionId === false);
+    }
+    const project = typeof injected.project === 'string' ? injected.project : '';
+    if (project === '') {
+      throw saveTargetRefusal('project', config.injectSessionProject === false);
+    }
+    const target: SaveTarget = { sessionId, project };
+
+    // Candidates BEFORE the write (design D3): nothing new exists yet, so there
+    // is no self-exclusion to do and the pool naturally contains whatever this
+    // write is about to update. The instrument line is emitted HERE rather than
+    // after the write: it describes the lookup, and its presence in the log is
+    // what makes "the lookup ran first" observable from outside (a test's write
+    // stub checks for it while handling the request).
+    const lookup =
+      config.searchEnabled === false
+        ? { payload: EMPTY_CANDIDATE_PAYLOAD, degraded: 'disabled' as const }
+        : await recallManager.candidates(
+            toCandidateQuery(
+              params,
+              target,
+              Math.min(writeLayer.saveCandidateLimit, config.searchTopK ?? 50),
+            ),
+            { budgetMs: writeLayer.saveCandidateBudgetMs, signal: exec.signal },
+          );
+
+    logCandidateInstrument(
+      site.sessionId,
+      lookup.payload,
+      lookup.payload.candidates.map((candidate) => candidate.id),
+      lookup.degraded,
+    );
+
+    let id: number | undefined;
+    let fallbackReason: string | undefined;
+    try {
+      const outcome = await writeObservation({
+        baseUrl: writeLayer.writeBaseUrl,
+        timeoutMs: writeLayer.writeTimeoutMs,
+        signal: exec.signal,
+        body: toWriteBody(params, target),
+      });
+      id = outcome.id;
+    } catch (error) {
+      if (!(error instanceof WriteFailure)) throw error;
+      // A 4xx is the request being wrong: another path would repeat the same
+      // rejection and turn a clear refusal into an unattributable write. A
+      // cancellation is the caller's own decision. Neither falls back.
+      if (error.kind === 'rejected' || error.kind === 'cancelled') throw error;
+      const fallback = await runSaveFallback(params, target, site, error, exec.signal);
+      id = fallback.id;
+      fallbackReason = `${error.kind}：${error.message}`;
+    }
+
+    const candidates = lookup.payload.candidates.map((candidate) => ({
+      ...candidate,
+      // The post-write mark: the id the backend returned is an EXISTING row's id
+      // (a new row's id is always greater than every id that existed before the
+      // write), so this comparison cannot produce a false positive (design D3).
+      will_update: id !== undefined && candidate.id === id,
+    }));
+
+    if (id !== undefined) instruments.noteSaved(site.sessionId, id);
+    const result: SaveResult = {
+      type: params.type,
+      project,
+      candidates,
+    };
+    if (id !== undefined) result.id = id;
+    if (fallbackReason !== undefined) result.fallback = { reason: fallbackReason };
+    return result;
+  }
+
+  /**
+   * The fallback: write through the upstream save tool, on its OWN budget.
+   *
+   * Two independent things are pinned here. The budget is synthesised by us
+   * because the MCP client has no per-call timeout — inheriting the shared
+   * `toolCallTimeoutMs` would push the save's static deadline into a minute and
+   * couple the save to every other tool (design D13). And the upstream envelope
+   * is PARSED rather than relayed: its candidates and judgment ids are exactly
+   * what this change removes, so only the id survives into the result; the rest
+   * is a log line.
+   */
+  async function runSaveFallback(
+    params: SaveParams,
+    target: SaveTarget,
+    site: ToolCallSite,
+    cause: WriteFailure,
+    signal: AbortSignal | undefined,
+  ): Promise<{ id?: number }> {
+    const controller = new AbortController();
+    let expired = false;
+    const onCallerAbort = (): void => controller.abort();
+    if (signal?.aborted === true) {
+      throw new Error('engram-bridge: 本次保存已被发起者取消，本次没有写入任何记忆。');
+    }
+    signal?.addEventListener('abort', onCallerAbort, { once: true });
+    const timer = setTimeout(() => {
+      expired = true;
+      controller.abort();
+    }, Math.max(1, Math.floor(writeLayer.saveFallbackBudgetMs)));
+    timer.unref?.();
+    try {
+      const result = await callOnWorkspace(
+        site.workspace,
+        REPLACED_SAVE_TOOL,
+        toFallbackArgs(params, target),
+        controller.signal,
+      );
+      const outcome = parseFallbackOutcome(result.content);
+      const pending = outcome.upstreamCandidates > 0 || outcome.upstreamJudgmentPending;
+      log.warn(
+        `保存回退到上游写入工具（写入面 ${cause.kind}：${cause.message}）；` +
+          `本次落库标识=${outcome.id === undefined ? '(未知)' : `#${outcome.id}`}` +
+          (pending
+            ? `；上游自己返回了 ${outcome.upstreamCandidates} 个候选并可能留下待判关系行（未转述给模型）`
+            : ''),
+      );
+      return outcome.id === undefined ? {} : { id: outcome.id };
+    } catch (error) {
+      const why = expired
+        ? `回退调用超过它自己的独立预算（${Math.floor(writeLayer.saveFallbackBudgetMs)}ms）`
+        : errorMessage(error);
+      throw new Error(
+        `engram-bridge: 保存失败——两条写入路径都不可用。写入面：${cause.kind} ${cause.message}；回退：${why}。` +
+          '本次没有可确认的落库。',
+      );
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onCallerAbort);
+    }
+  }
+
+  /**
+   * One log line per save that attempted a candidate lookup: lag, pool
+   * composition, consistency with what this session was shown, and the reason
+   * when the lookup degraded. Instruments only — nothing here changes behaviour,
+   * and nothing is persisted (design D9).
+   */
+  function logCandidateInstrument(
+    sessionId: string,
+    payload: CandidatePayload,
+    shownIds: readonly number[],
+    degraded: string | undefined,
+  ): void {
+    const line = instruments.candidateLine({
+      sessionId,
+      poolIds: payload.poolIds,
+      shownIds,
+      metering: payload.metering,
+      ...(degraded === undefined ? {} : { degraded }),
+    });
+    log.info(line);
   }
 
   const capture = new PassiveCapture({
@@ -527,6 +856,16 @@ export function apply(ctx: PluginContext, config: EngramConfig, deps: PluginDeps
     // restriction hides the tools once their names are known.
     guardEngramTools(agent as never, log);
     shadowEngramTools(agent as never, [...registeredNames], log);
+  });
+
+  ctx.on('agent/disposed', (...args: never[]) => {
+    const payload = args[0] as { agent?: AgentLike } | undefined;
+    const sessionId = payload?.agent?.session?.header?.id;
+    if (typeof sessionId !== 'string' || sessionId === '') return;
+    // The per-session counters are in-memory only, so the honest teardown is to
+    // drop them; keeping them would leak one session's ids into another's rate.
+    agents.delete(sessionId);
+    instruments.forget(sessionId);
   });
 
   ctx.on('agent/turn-stopping', (...args: never[]) => {
@@ -627,5 +966,20 @@ export function apply(ctx: PluginContext, config: EngramConfig, deps: PluginDeps
 
   // Fail loud on unusable configuration, never at call time.
   if (config.command.trim() === '') throw new Error('engram-bridge: config.command is required');
+  try {
+    new URL(writeLayer.writeBaseUrl);
+  } catch {
+    throw new Error(
+      `engram-bridge: config.writeBaseUrl 不是合法的 URL：${String(writeLayer.writeBaseUrl)}（例如 http://127.0.0.1:7437）`,
+    );
+  }
+  if ((config.searchTopK ?? 50) < writeLayer.saveCandidateLimit) {
+    // The displayed candidates have to be inside the coverage-boost pool, or the
+    // pool size becomes a silent cap on the ranking the write layer reuses (D2).
+    throw new Error(
+      `engram-bridge: searchTopK(${config.searchTopK ?? 50}) 小于 saveCandidateLimit(${writeLayer.saveCandidateLimit})：` +
+        '被展示的候选拿不到覆盖加成，请把 searchTopK 调大或把 saveCandidateLimit 调小。',
+    );
+  }
   chooseProject(injectionInputs({ sessionId: '', workspace: '' }, undefined));
 }

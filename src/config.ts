@@ -33,6 +33,55 @@ export function defaultSearchDbPath(): string {
   return join(engramDataDir(), 'engram.db');
 }
 
+/**
+ * Write-layer defaults, as functions for the same reason as the read layer's:
+ * the schema default and the runtime fallback are the SAME declaration, so a
+ * directly-constructed config (tests, embedders) that omits the key behaves
+ * exactly like a user who left it unset.
+ *
+ * `writeBaseUrl` is engram's own HTTP default port; the plugin never discovers
+ * or starts that server (see `openspec/config.yaml`).
+ */
+export function defaultWriteBaseUrl(): string {
+  return 'http://127.0.0.1:7437';
+}
+
+export function defaultWriteTimeoutMs(): number {
+  return 10000;
+}
+
+export function defaultSaveCandidateBudgetMs(): number {
+  return 2000;
+}
+
+export function defaultSaveFallbackBudgetMs(): number {
+  return 20000;
+}
+
+export function defaultSaveCandidateLimit(): number {
+  return 5;
+}
+
+/** The write layer's resolved settings: what the save path actually branches on. */
+export interface WriteLayerConfig {
+  writeBaseUrl: string;
+  writeTimeoutMs: number;
+  saveCandidateBudgetMs: number;
+  saveFallbackBudgetMs: number;
+  saveCandidateLimit: number;
+}
+
+/** Apply the schema defaults to a config that may have been constructed directly. */
+export function writeLayerSettings(config: Config): WriteLayerConfig {
+  return {
+    writeBaseUrl: config.writeBaseUrl ?? defaultWriteBaseUrl(),
+    writeTimeoutMs: config.writeTimeoutMs ?? defaultWriteTimeoutMs(),
+    saveCandidateBudgetMs: config.saveCandidateBudgetMs ?? defaultSaveCandidateBudgetMs(),
+    saveFallbackBudgetMs: config.saveFallbackBudgetMs ?? defaultSaveFallbackBudgetMs(),
+    saveCandidateLimit: config.saveCandidateLimit ?? defaultSaveCandidateLimit(),
+  };
+}
+
 /** Resolved plugin configuration; defaults live in the schema below. */
 export interface Config {
   /** engram executable. */
@@ -98,6 +147,30 @@ export interface Config {
   searchTopK: number;
   /** Coverage variant. `field_cov` is the validated default. */
   searchCoverage: CoverageVariant;
+  /**
+   * Write layer: engram's HTTP surface. The write path needs `engram serve` on
+   * the other end (the plugin never discovers or starts it); without it every
+   * save falls back to the upstream write tool.
+   */
+  writeBaseUrl: string;
+  /** One write request's own deadline; over it the request is abandoned. */
+  writeTimeoutMs: number;
+  /**
+   * The candidate query's own short budget. It bounds a purely advisory lookup,
+   * so expiry means "no candidates this time", never a failed save.
+   */
+  saveCandidateBudgetMs: number;
+  /**
+   * The fallback call's own budget. Deliberately NOT `toolCallTimeoutMs`: the
+   * MCP client has no per-call timeout, so the fallback synthesises its own
+   * deadline instead of inheriting the shared one (design D13).
+   */
+  saveFallbackBudgetMs: number;
+  /**
+   * How many candidates a save result may show (M). Constrained by the read
+   * layer's coverage pool: `searchTopK >= saveCandidateLimit`, checked at load.
+   */
+  saveCandidateLimit: number;
 }
 
 export const Config: z<Config> = z.object({
@@ -133,4 +206,13 @@ export const Config: z<Config> = z.object({
   searchW: z.number().default(0.20),
   searchTopK: z.number().default(50),
   searchCoverage: z.union([z.const('field_cov'), z.const('cov_n'), z.const('idf_cov')]).default('field_cov'),
+  // Write layer. `write*` is the HTTP surface (an external process); `save*` is
+  // this plugin's save entry point. The one knob that is NOT new is the
+  // coverage-boost pool: it reuses `searchTopK`, because it is the same pool the
+  // read layer's ranking already uses (design D2).
+  writeBaseUrl: z.string().default(defaultWriteBaseUrl()),
+  writeTimeoutMs: z.number().min(1).default(defaultWriteTimeoutMs()),
+  saveCandidateBudgetMs: z.number().min(0).default(defaultSaveCandidateBudgetMs()),
+  saveFallbackBudgetMs: z.number().min(1).default(defaultSaveFallbackBudgetMs()),
+  saveCandidateLimit: z.number().min(1).default(defaultSaveCandidateLimit()),
 });

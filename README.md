@@ -8,6 +8,7 @@
 
 - `dsh`（含 `dsh plugin`）与 `pnpm`
 - engram 可执行文件，`engram mcp` 能作为 stdio MCP 服务启动
+- **保存走 engram 的 HTTP 写入面**：需要 `engram serve` 在跑（默认端口 `7437`）。插件**不负责发现或启动它**（那个进程同时承载云同步）。它不在时保存会**回退**到上游写入工具并继续成功，只是那一次仍会留下上游的待判关系行；换端口/地址用 `writeBaseUrl`。
 - **Node ≥ 24**（`package.json` 的 `engines`）。依据是实测下限，不是估计：24.16.0 与 26.7.0 都跑通了 `node --test` 与一次真实的 `worker.js --rebuild`。检索需要无需 flag 的 `node:sqlite`；22/23 未实测，故不声称可用。宿主进程用不到它，但检索子进程与宿主必然是同一个二进制，所以只声明这一条范围。
 
 ## 安装
@@ -63,6 +64,18 @@ engram 自带的 `mem_search` **不再注册**（FTS5 的中文分词按标点�
 - `~/.dsh/skills/engram-memory/SKILL.md`：把 `mem_search` 换成 `mem_bridge_recall`，并把"FTS5 全文检索"改为事实表述（它是 bigram 词法覆盖 + 语义向量的混合检索），同时补一句"省略范围时两种范围都可以出现"。
 - 同一处再补一句**积压时的三步**：检索明确告知「待处理量超出自动上限」时，先调用 `mem_bridge_recall_sync`（它可能耗时数分钟，**调用前先告知用户**），完成后重发原检索；若错误里说连它也放不下，就让操作者运行 `/engram-sync`。
 
+## 迁移：`mem_save` → `mem_bridge_save`
+
+engram 自带的保存工具 **不再注册**：它的冲突候选只拿**标题**走 FTS5，而该库的 FTS 建表没指定分词器（中文只在标点处切开），所以候选基本是空转，却仍然**为每次保存插一行 `pending` 关系行**（隔离库里实测：一次保存 +1 行，且**同一对**重复保存会再插一行）。取代它的是 `mcp__engram__mem_bridge_save`：写入走 HTTP 面（因此没有那道扫描），候选由插件在**写入之前**用读层已有的派生索引算好，随那一次保存的结果交付，并带上机械证据（共享的稀有词、是否同主题键、语义名次……）。直接调用 `mem_save` 会以**未知工具**错误失败——这是刻意的。
+
+三条与旧入口不同的行为，值得先知道：
+
+- **候选只在那一次回复内有效**：插件不落库、不重发、不补发；错过窗口只意味着"这一次不记"，下次保存近似内容时同一条还会再出现。
+- **`project` / `session_id` 由同一套注入取得**，注入被关闭且没有显式传值时，这次保存会被**明确拒绝**（旧入口在"项目"这一支上还能写成功，所以这是**刻意引入的行为变化**：换来的是一条规则而不是两条）。两条出路：显式传值，或打开对应开关。
+- **写入面不可达时回退到上游写入工具**：结果里会写明回退，并给出本次落库标识；上游自己那套候选与判定标识**不转述**（否则本次要根除的东西会从这条路漏回模型眼前）。4xx **不回退**——那说明请求本身有问题，换条路只会再犯一次。
+
+用户侧文件不随插件分发，插件只能保证旧名响亮失败。若你曾把 `mem_save` 写进 `~/.dsh/AGENTS.md` 或 `~/.dsh/skills/engram-memory/SKILL.md`，请自行改成 `mem_bridge_save`；删掉那两份手抄件则直接用插件自带的协议文本。
+
 ## 配置
 
 自带的 patch 只负责插入 `engram-bridge` 这一行，**不要再手写同名 `insert`**。按机器覆盖配置时，在 home 层（`~/.dsh/cordis.patch.yml`）或对应 profile 的 patch 里按 `id` 覆盖：
@@ -100,6 +113,11 @@ engram 自带的 `mem_search` **不再注册**（FTS5 的中文分词按标点�
 | `searchW` | `0.20` | 覆盖率提升权重（P2 调参、P3 留出确认，勿随手改） |
 | `searchTopK` | `50` | 覆盖率提升所及的排序深度；不是候选集上限 |
 | `searchCoverage` | `field_cov` | 覆盖率变体：`field_cov` / `cov_n` / `idf_cov` |
+| `writeBaseUrl` | `http://127.0.0.1:7437` | engram HTTP 写入面；端口取自该服务自己的默认值 |
+| `writeTimeoutMs` | `10000` | 单次写入请求的超时；超时即放弃（服务端可能已落库） |
+| `saveCandidateBudgetMs` | `2000` | **保存时算候选**的独立短预算；超时即「本次没有候选」，保存不受影响 |
+| `saveFallbackBudgetMs` | `20000` | 回退调用**自己的**预算；不继承 `toolCallTimeoutMs`（MCP 客户端没有 per-call 超时） |
+| `saveCandidateLimit` | `5` | 保存结果里展示的候选条数（M）；必须 ≤ `searchTopK`（否则加载时抛错） |
 
 返回条数上限 `limit` **不是**配置项：它是 `mem_bridge_recall` 的输入参数，默认值只写在工具的输入 schema 里（10）。
 建索引侧的四个打分常量（`k1` / `b` / `title_weight` / `evidence_weight`）也不在配置里——它们决定排序，随索引版本走，由索引自己的 `meta` 单方面作准。
@@ -111,6 +129,7 @@ engram 自带的 `mem_search` **不再注册**（FTS5 的中文分词按标点�
 - **工具**：engram 的工具以 `mcp__engram__*` 出现在模型工具面；对子 agent 不可见（含 `mcp_call` 之类旁路）。
 - **检索**：`mcp__engram__mem_bridge_recall` 是插件自有的只读检索入口（不是 engram 声明的工具）：本地派生索引、默认只返回当前项目的记忆、要求跨项目须显式 `all_projects`、结果被截断时会说明还有未显示的条目、类型取值不做枚举（传了不存在的取值会换来实际取值）。它不写记忆、不改正本、删掉索引即可恢复原状。
 - **显式追赶**：`mcp__engram__mem_bridge_recall_sync` 把派生索引一次追到最新（可能耗时数分钟，**调用前应先告知用户会等待**，完成后重发原检索）。它在检索明确告知「待处理量超出自动上限」时使用；不改配置、不重启宿主。它受 `searchEnabled` 约束（与检索同一道开关）。
+- **保存**：`mcp__engram__mem_bridge_save` 是插件自有的保存入口（不是 engram 声明的工具）：经 HTTP 写入面落库，结果里给出**本次保存的标识**；同一项目里有相似条目时附上候选与机械证据（只说事实、不下结论），并附一句只在有候选时出现的动作提醒。候选不重发、不落库、不影响后续调用。
 - **隐式参数**：声明 `project` / `session_id` 的工具由插件补齐当前会话的项目与会话 id，显式传参优先；`mem_session_start` 的 `id` 由插件持有，模型改不了。检索工具同样按自己声明的参数接受注入；**项目注入被关闭且未显式传 `project` 时，检索被拒绝**（附两条出路），不会以未限定项目运行。
 - **压缩**：`compaction/summary` 自动落库，模型无需自己再存摘要；`compaction/end` 后注入一段有界召回。手动 `/compact` 会立即开启一轮独立的自恢复回合。
 - **协议文本**：插件自带一段常驻的系统提示词段（「什么时候必须做」，随包资产 `protocol/resident.md`）与一个运行时技能（完整流程，`protocol/engram-memory.skill.md`，按需加载）。两段文本随插件版本走，**使用者机器上不需要任何文件**。子 agent 没有 engram 工具，因此也拿不到那段常驻文本（空段由宿主丢弃）。召回仍是一条 user 消息，会话日志可完整重建。
@@ -128,6 +147,8 @@ engram 自带的 `mem_search` **不再注册**（FTS5 的中文分词按标点�
 - **每次手动 `/compact` 多一个 LLM 回合**（自恢复回合同样以 `agent/turn-stopping` 收尾，会多一次被动捕获）。`recallWakeup: false` 可拒绝该成本，代价是召回要等用户下一条消息，且可能被取消或会话销毁丢弃。
 - **自恢复回合进行期间无法再次压缩**：压缩需要宿主 idle，这一轮跑完前 `/compact` 会被拒绝。
 - **积压超出常规检索的自动上限时，检索会拒绝而不是自己慢慢追**（这是刻意的：等待要由调用方知情选择）。错误里给出待处理条数、预估耗时与可用的入口；`/engram-sync` 是那一档剩下的唯一出路。
+- **保存依赖 HTTP 写入面这一前提**：`engram serve` 不在时每次保存都要多走一次上游写入，并仍会产生一行 `pending`（那是那条路径的既有行为）。同一条记忆在两条路径上会不会落成两行，取决于去重键的**时间窗**（默认 15 分钟）——超时回退若超过窗口，补写会落成第二行。
+- **两个注入开关现在会挡掉保存**：`injectSessionId=false` 或 `injectSessionProject=false` 且调用方没有显式传值时，保存被拒绝（项目那一支是本次刻意引入的回归，见上）。
 - **一次显式追赶会占住一次调用最多 10 分钟**（操作者命令不设上限，靠取消与卸载终止）。**同一份派生数据同一时刻只有一个写入者**（跨进程锁 + 进展心跳）；追赶期间并发的检索会以「正在更新」失败，而不是读到半成品。
 
 ## 深入阅读
@@ -135,7 +156,8 @@ engram 自带的 `mem_search` **不再注册**（FTS5 的中文分词按标点�
 | 文档 | 内容 |
 | --- | --- |
 | `openspec/specs/` | 行为规格：连接池与降级、会话绑定、参数注入、被动捕获、压缩恢复、记忆连续性 |
-| `openspec/changes/engram-bridge-read-layer/` | 读层这次变更的 proposal / design / specs / tasks（归档后才落到 `openspec/specs/`）。`design.md` 记录了词法+向量打分的取舍与实测指纹，`specs/engram-bridge-recall/` 是检索入口的行为契约 |
+| `openspec/changes/engram-bridge-read-layer/` | 读层那次变更的 proposal / design / specs / tasks（归档后才落到 `openspec/specs/`）。`design.md` 记录了词法+向量打分的取舍与实测指纹，`specs/engram-bridge-recall/` 是检索入口的行为契约 |
+| `openspec/changes/engram-bridge-write-layer/` | 写层这次变更：保存入口改由桥承载、候选在写入前算好。`design.md` 里有两条路径的逐项对照与裁决路径的四步实测，`specs/engram-bridge-save/` 是保存入口的行为契约 |
 | `docs/event-findings.md` | dsh 宿主事件探针报告——本插件接口契约的依据 |
 | `docs/engram-upgrade-checklist.md` | 升级 engram / dsh 后的回归清单（含 engram 自身的语义坑） |
 | `AGENTS.md` | 开发约束与命令 |

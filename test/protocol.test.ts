@@ -51,7 +51,7 @@ test('the shipped skill asset parses into catalog fields plus a frontmatter-free
   assert.ok(!assets.skill.description.includes('\n'), 'description must be one line');
   assert.ok(assets.skill.content.startsWith('# '), 'body must not start with a frontmatter block');
   assert.ok(!assets.skill.content.includes('name: engram-memory'));
-  assert.ok(assets.resident.includes('mem_save'));
+  assert.ok(assets.resident.includes('mem_bridge_save'));
   assert.ok(!assets.resident.startsWith('---'));
 });
 

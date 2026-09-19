@@ -62,11 +62,19 @@ export function siteOf(exec: { agent?: unknown }): ToolCallSite {
  * retrieval tokenizes CJK as whole punctuation-delimited runs with a default AND, which
  * measured R@10 = 0.0000 / 0.0520 on the two frozen proxies; keeping it registered would
  * leave a second, broken retrieval path behind the same tool list.
+ *
+ * `mem_save` is replaced by this plugin's own save entry point. Its handler unconditionally
+ * runs a conflict-candidate scan whose matching is title-only FTS with a tokenizer that
+ * cannot split Chinese, and it inserts one `pending` relation row per "candidate" it finds;
+ * there is no switch for it (the `BM25Floor` override has no CLI/env entry point in the
+ * backend version in use). Filtering that at the exit is the shape the read layer already
+ * rejected, so the entry itself is removed and the bridge computes its own candidates.
  */
 export const UNREGISTERED_ENGRAM_TOOLS: readonly string[] = [
   'mem_capture_passive',
   'mem_save_prompt',
   'mem_search',
+  'mem_save',
 ];
 
 /** One ToolDefinition per engram-declared tool, named `mcp__engram__<name>`. */

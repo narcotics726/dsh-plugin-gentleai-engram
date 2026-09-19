@@ -9,6 +9,8 @@ import type { CoverageVariant } from './scoring.js';
 import {
   ONESHOT_BACKLOG_EXIT,
   ONESHOT_RUNTIME_MISSING_EXIT,
+  type CandidatePayload,
+  type CandidateQuery,
   type RecallDeferral,
   type RecallErrorKind,
   type RecallPayload,
@@ -216,6 +218,8 @@ class Worker {
     switch (request.cmd) {
       case 'query':
         return await this.query(request.query as RecallQuery);
+      case 'candidates':
+        return await this.candidates(request.candidateQuery as CandidateQuery);
       case 'rebuild': {
         // Residual command with no sender, but it is a product path all the
         // same: it goes through the same cap and the same lock.
@@ -236,6 +240,27 @@ class Worker {
     const payload = await this.getEngine().query(request, this.policy());
     this.accumulate(payload);
     return payload;
+  }
+
+  /**
+   * The candidate lookup: the one command whose contract is "never fail".
+   *
+   * Retrieval fails loudly when its runtime or model is missing (hard rule 4);
+   * this does the opposite, on purpose (design D4/D5): candidates are an
+   * enhancement attached to a write, so every failure becomes "no candidates
+   * this time" and only the log says what happened. Nothing else in the worker
+   * changes state because of it — no index is created, no catch-up runs, and a
+   * slow lookup does not get the worker killed (the host abandons its own
+   * request instead).
+   */
+  private async candidates(request: CandidateQuery): Promise<CandidatePayload> {
+    if (request === undefined) return emptyCandidatePayload();
+    try {
+      return await this.getEngine().candidates(request, this.policy());
+    } catch (error) {
+      this.log('warn', `候选查询失败，本次没有候选（保存不受影响）：${errorText(error)}`);
+      return emptyCandidatePayload();
+    }
   }
 
   private accumulate(payload: RecallPayload): void {
@@ -266,8 +291,26 @@ class Worker {
   }
 }
 
-function workerError(error: unknown): WorkerErrorInfo {
-  const info: WorkerErrorInfo = { kind: errorKind(error), message: errorText(error) };
+function emptyCandidatePayload(): CandidatePayload {
+  return {
+    candidates: [],
+    poolIds: [],
+    metering: {
+      sourceChanged: false,
+      lagDocs: 0,
+      docCount: 0,
+      candidates: 0,
+      poolSize: 0,
+      filteredOut: 0,
+      hashMs: 0,
+      embedMs: 0,
+      scoreMs: 0,
+      totalMs: 0,
+    },
+  };
+}
+
+function workerError(error: unknown): WorkerErrorInfo {  const info: WorkerErrorInfo = { kind: errorKind(error), message: errorText(error) };
   const deferral = deferralOf(error);
   if (deferral !== undefined) info.deferral = deferral;
   return info;

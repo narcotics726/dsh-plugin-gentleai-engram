@@ -8,64 +8,21 @@
  * bridge SUBMITTED (content, source, session_id) without needing the real binary.
  */
 import { appendFileSync } from 'node:fs';
+import { TOOLS } from './engram-tools.mjs';
 
 const LOG = process.env.ENGRAM_STUB_LOG;
 
-const schema = (properties, required) => ({ type: 'object', properties, required });
-
-const TOOLS = [
-  {
-    name: 'mem_session_start',
-    description: 'Start a session',
-    inputSchema: schema({ id: { type: 'string' }, directory: { type: 'string' } }, ['id']),
-  },
-  {
-    name: 'mem_capture_passive',
-    description: 'Extract learnings from text',
-    inputSchema: schema(
-      { content: { type: 'string' }, session_id: { type: 'string' }, source: { type: 'string' } },
-      ['content'],
-    ),
-  },
-  {
-    name: 'mem_save_prompt',
-    description: 'Save a user prompt to persistent memory',
-    inputSchema: schema({ content: { type: 'string' }, session_id: { type: 'string' } }, ['content']),
-  },
-  {
-    name: 'mem_session_summary',
-    description: 'Save an end-of-session summary',
-    inputSchema: schema(
-      { content: { type: 'string' }, session_id: { type: 'string' }, capture_prompt: { type: 'boolean' } },
-      ['content'],
-    ),
-  },
-  {
-    name: 'mem_context',
-    description: 'Recent memory context',
-    inputSchema: schema({ project: { type: 'string' }, limit: { type: 'number' } }, []),
-  },
-  {
-    // The real engram declares a retrieval tool too. The bridge deliberately does
-    // NOT register it (the plugin's own entry point replaces it), so the stub has
-    // to declare it for that exclusion to be exercised in the default gate.
-    name: 'mem_search',
-    description: 'Full-text search over memories',
-    inputSchema: schema(
-      { query: { type: 'string' }, project: { type: 'string' }, match_mode: { type: 'string' }, limit: { type: 'number' } },
-      ['query'],
-    ),
-  },
-  {
-    name: 'mem_save',
-    description: 'Save an observation',
-    inputSchema: schema({ title: { type: 'string' }, content: { type: 'string' }, type: { type: 'string' } }, ['title']),
-  },
-];
-
+// `ENGRAM_STUB_NO_PROJECT=1` makes every envelope omit the project fields, which
+// is how the write-layer tests construct "the backend did not give us a project".
 const envelope = (result, extra = {}) => ({
   type: 'text',
-  text: JSON.stringify({ project: 'stub-project', project_source: 'stub', result, ...extra }),
+  text: JSON.stringify({
+    ...(process.env.ENGRAM_STUB_NO_PROJECT === '1'
+      ? {}
+      : { project: 'stub-project', project_source: 'stub' }),
+    result,
+    ...extra,
+  }),
 });
 
 function respondFor(name) {
@@ -75,6 +32,27 @@ function respondFor(name) {
   }
   if (name === 'mem_session_summary') return { content: [envelope('summary saved')] };
   if (name === 'mem_context') return { content: [envelope('STUB RECALL: recent memory context for this session')] };
+  if (name === 'mem_save') {
+    // The upstream save tool's envelope: the id of the row it wrote or updated,
+    // plus — unconditionally, in the real backend — its own candidate scan and the
+    // pending relation it inserted for it. The fallback path has to keep the id
+    // and drop the rest.
+    return {
+      content: [
+        envelope('Memory saved: "stub" (manual)\nCONFLICT REVIEW PENDING — 1 candidate(s); use mem_judge to record verdicts.', {
+          id: 4242,
+          sync_id: 'obs-stub',
+          state: 'active',
+          judgment_required: true,
+          judgment_status: 'pending',
+          judgment_id: 'rel-stub',
+          candidates: [
+            { id: 9, sync_id: 'obs-9', title: 'stub candidate', type: 'decision', score: -0.000002, judgment_id: 'rel-stub' },
+          ],
+        }),
+      ],
+    };
+  }
   return { content: [envelope('ok')] };
 }
 

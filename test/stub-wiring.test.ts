@@ -203,7 +203,10 @@ test('stub wiring: capture and compaction recovery react to real host envelopes'
     };
 
     await host.handlers.get('agent/session-start')?.({ agent });
-    await waitFor(() => host.registrations.includes('mcp__engram__mem_save'));
+    // The marker is the plugin's own save entry: `mem_save` itself is now one of
+    // the deliberately unregistered tools, so it can no longer be the signal that
+    // "the engram surface has been registered".
+    await waitFor(() => host.registrations.includes('mcp__engram__mem_bridge_save'));
     assert.ok(
       !host.registrations.includes('mcp__engram__mem_capture_passive'),
       'passive capture must not be registered (single writer)',
@@ -375,15 +378,18 @@ test('sub-agent isolation covers a sub-agent created BEFORE the tool surface is 
 
     assert.equal(agentCtx.guards.length, 1, 'the execution guard must be installed at creation');
     const guard = agentCtx.guards[0];
-    assert.equal(typeof guard?.({ name: 'mcp__engram__mem_save' }), 'string', 'engram tools are denied');
+    assert.equal(typeof guard?.({ name: 'mcp__engram__mem_context' }), 'string', 'engram tools are denied');
     assert.equal(guard?.({ name: 'bash' }), undefined, 'unrelated tools stay allowed');
     assert.deepEqual(agentCtx.restricts, [], 'no names were known yet, so nothing to hide');
 
     // ... and once registration completes, the visibility restriction is re-applied
-    await waitFor(() => host.registrations.includes('mcp__engram__mem_save'));
+    // The marker is the plugin's own save entry: `mem_save` itself is now one of
+    // the deliberately unregistered tools, so it can no longer be the signal that
+    // "the engram surface has been registered".
+    await waitFor(() => host.registrations.includes('mcp__engram__mem_bridge_save'));
     await host.handlers.get('agent/created')?.({ agent });
     const denied = agentCtx.restricts.at(-1) ?? [];
-    assert.ok(denied.includes('mcp__engram__mem_save'), 'the late restriction names the registered tools');
+    assert.ok(denied.includes('mcp__engram__mem_bridge_save'), 'the late restriction names the registered tools');
     assert.ok(denied.includes('mcp__engram__mem_context'), 'every registered engram tool is denied to the sub-agent');
   } finally {
     host.disposeAll();

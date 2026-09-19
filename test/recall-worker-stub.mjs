@@ -11,6 +11,7 @@
  *   STUB_DEFERRAL_MODE=m   'incremental' (default) or 'full'
  *   STUB_BUSY=1            queries answer { kind: 'busy' }
  *   STUB_QUERY_DELAY_MS=n  delay query responses
+ *   STUB_CANDIDATES_DELAY_MS=n  delay candidate responses (drives the budget test)
  *   STUB_SYNC_DELAY_MS=n   delay the one-shot exit (keeps a one-shot in flight)
  *   STUB_SYNC_EXIT=n       one-shot exit code (sync mode)
  *   STUB_REBUILD_EXIT=n    one-shot exit code (rebuild mode)
@@ -90,6 +91,26 @@ function serve() {
   });
 
   const delay = Number(process.env.STUB_QUERY_DELAY_MS ?? 0);
+  const candidateDelay = Number(process.env.STUB_CANDIDATES_DELAY_MS ?? 0);
+  // The candidate command's contract is "answer or degrade, never fail": the host
+  // abandons its own request on the budget, so the stub just answers (late, when a
+  // delay is configured) with the empty shape.
+  const emptyCandidates = {
+    candidates: [],
+    poolIds: [],
+    metering: {
+      sourceChanged: false,
+      lagDocs: 0,
+      docCount: 0,
+      candidates: 0,
+      poolSize: 0,
+      filteredOut: 0,
+      hashMs: 0,
+      embedMs: 0,
+      scoreMs: 0,
+      totalMs: 0,
+    },
+  };
 
   const rl = createInterface({ input: process.stdin });
   rl.on('line', (line) => {
@@ -123,6 +144,13 @@ function serve() {
         ok: false,
         error: { kind: 'busy', message: 'stub: 索引正在被另一个进程更新（等待 2000ms 后仍被占用）' },
       });
+      return;
+    }
+    if (request.cmd === 'candidates') {
+      const respond = () =>
+        write({ type: 'response', id: request.id, ok: true, result: emptyCandidates });
+      if (candidateDelay > 0) setTimeout(respond, candidateDelay);
+      else respond();
       return;
     }
     const respond = () => write({ type: 'response', id: request.id, ok: true, result: payload(request.query ?? {}) });

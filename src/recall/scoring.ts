@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { IndexDb } from './index-db.js';
-import { distinctTokens, tokenKey, tokenize, type Token } from './tokenizer.js';
+import { codePointCompare, distinctTokens, tokenKey, tokenize, type Token } from './tokenizer.js';
 
 /**
  * Lexical + vector scoring over the derived index.
@@ -250,6 +250,46 @@ export class Scorer {
     rows.sort((a, b2) => (a.score !== b2.score ? (a.score > b2.score ? -1 : 1) : a.id - b2.id));
     for (const row of rows) coverage[this.pos.get(row.id)!] = row.cov;
     return { ids: rows.map((row) => row.id), coverage, ordering: rows.map((row) => row.score) };
+  }
+
+  /**
+   * Which query tokens one document shares, rarest first — evidence, NOT ranking.
+   *
+   * The lexical half of `lexicalOrder` computes exactly this intersection on its
+   * way to the coverage mass; the write layer needs it spelled out, because a
+   * bare count cannot be checked ("the 3 shared words" may be the topic or may be
+   * boilerplate). IDF ordering reuses the same formula as the ordering itself, so
+   * "rarest" means the same thing in both places.
+   *
+   * Only requested documents are inspected, and the returned list is capped.
+   */
+  sharedRareTerms(query: string, docIds: readonly number[], maxTerms: number): Map<number, string[]> {
+    const out = new Map<number, string[]>();
+    const qd = distinctTokens(query);
+    if (qd.length === 0 || maxTerms <= 0) return out;
+    const wanted = new Set(docIds);
+    const post = qd.map((token) => this.postings(token));
+    const idf = post.map((p) => Math.log(1.0 + (this.n - p.size + 0.5) / (p.size + 0.5)));
+    const hits = new Map<number, Array<{ token: string; idf: number }>>();
+    for (let t = 0; t < qd.length; t++) {
+      const token = qd[t]!;
+      for (const docId of post[t]!.keys()) {
+        if (!wanted.has(docId)) continue;
+        let list = hits.get(docId);
+        if (list === undefined) {
+          list = [];
+          hits.set(docId, list);
+        }
+        list.push({ token: token[0], idf: idf[t]! });
+      }
+    }
+    for (const [docId, list] of hits) {
+      list.sort((a, b) =>
+        a.idf !== b.idf ? (a.idf > b.idf ? -1 : 1) : codePointCompare(a.token, b.token),
+      );
+      out.set(docId, list.slice(0, maxTerms).map((entry) => entry.token));
+    }
+    return out;
   }
 
   /** Full ranking: cosine for every document plus the pool-only coverage boost. */

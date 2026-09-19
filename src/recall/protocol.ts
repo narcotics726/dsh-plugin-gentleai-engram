@@ -83,10 +83,95 @@ export interface RecallPayload {
   metering: RecallMetering;
 }
 
+/**
+ * Candidate query: "which memories in this project resemble the text I am about
+ * to write".
+ *
+ * Deliberately NOT a retrieval: the contract is the opposite of `RecallQuery`
+ * in four places (design D4). It answers from the derived state as it stands
+ * (no catch-up, never a rebuild); missing derived data or a missing runtime
+ * means "no candidates", never a refusal; and it carries its own short budget.
+ */
+export interface CandidateQuery {
+  /** Title of the observation about to be written. */
+  title: string;
+  /** Content of the observation about to be written. */
+  content: string;
+  /** Type of the observation about to be written (already defaulted by the caller). */
+  type: string;
+  /** Topic key of the observation about to be written; empty when none was given. */
+  topicKey: string;
+  /** Session the write is attributed to; empty when unknown. */
+  sessionId: string;
+  /** The project the write belongs to. Candidates are restricted to it. */
+  project: string;
+  /** How many to show (M). */
+  limit: number;
+}
+
+/**
+ * One candidate's mechanical evidence.
+ *
+ * This struct IS the canonical value; the model sees a projection of it
+ * (design D12). Every field is a mechanical predicate over comparable facts —
+ * no field names a verdict, and none depends on the new row already existing
+ * (`will_update` is decided by the host AFTER the write, from the returned id).
+ */
+export interface CandidateEvidence {
+  id: number;
+  title: string;
+  type: string;
+  updated_at: string;
+  /**
+   * The shared topic key itself, or `''` when the two do not share one.
+   *
+   * It carries the value rather than a bare flag because the projection has to
+   * name the key ("a number must be traceable to a concrete thing"), and the
+   * empty string is the sentinel because the host enforces a JSON-schema subset
+   * that allows exactly ONE scalar `type` — `['string','null']` rejects the whole
+   * plugin tree at load.
+   */
+  same_topic_key: string;
+  same_session: boolean;
+  same_type_and_title: boolean;
+  identical_content: boolean;
+  /** Shared rare terms, rarest first, spelled out. `count === terms.length`. */
+  shared_rare_terms: { count: number; terms: string[] };
+  /** Mechanical rank in the read layer's own ordering (never a raw score). */
+  semantic_rank: number;
+  corpus_size: number;
+}
+
+export interface CandidateMetering {
+  /** Whether the source changed since the index was last synced (same hash as the read layer). */
+  sourceChanged: boolean;
+  /** Active rows in the source minus documents in the index; can be negative. */
+  lagDocs: number;
+  docCount: number;
+  /** Documents sharing at least one token with the query text (pool eligibility). */
+  candidates: number;
+  /** Coverage-boost pool size actually used. */
+  poolSize: number;
+  /** Documents ruled out by the project restriction while walking the ranking. */
+  filteredOut: number;
+  hashMs: number;
+  embedMs: number;
+  scoreMs: number;
+  totalMs: number;
+}
+
+export interface CandidatePayload {
+  candidates: CandidateEvidence[];
+  /** Ranks BEFORE the project filter, so the pool composition stays observable. */
+  poolIds: number[];
+  metering: CandidateMetering;
+}
+
 export interface WorkerRequest {
   id: number;
-  cmd: 'query' | 'rebuild' | 'stats' | 'shutdown';
+  cmd: 'query' | 'candidates' | 'rebuild' | 'stats' | 'shutdown';
   query?: RecallQuery;
+  candidateQuery?: CandidateQuery;
 }
 
 /** One settled one-shot run, reported by the `--sync`/`--rebuild` child. */

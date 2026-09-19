@@ -34,7 +34,7 @@
 **Non-Goals:**
 
 - 关系注解、读层索引、engram 正本库的任何读取——本次一概不碰。
-- 中文写侧候选生成：不做 workaround，也不在本次记录。使用者已定：将来用「替换保存入口」的方式（与今天用自有检索替换 engram 的 `mem_search` 同形）从根上解决。
+- 中文写侧候选生成：不做 workaround，也不在本次记录。使用者已定：将来用「替换保存入口」的方式（与今天用自有检索替换 engram 的 `mem_search` 同形）从根上解决。**已完成**：2026-09-19 的变更 `engram-bridge-write-layer` 就是那件事——上游写入工具不再注册，保存走桥自有的入口，候选在写入之前由读层的派生索引算出（见 `openspec/specs/engram-bridge-save/`）。
 - 不改 engram 后端，不动 `src/recall/scoring.ts` 的排序，不新增会话事件类型。
 
 ## Decisions

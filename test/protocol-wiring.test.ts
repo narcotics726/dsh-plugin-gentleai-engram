@@ -131,7 +131,7 @@ test('the section text is the resident asset for a main agent and empty for a su
     apply(host.ctx, configFor(callsPath));
     const provide = host.sections[0]!.text as (context: unknown) => string;
     const main = provide({ agent: { session: { header: {} } } });
-    assert.ok(main.includes('mem_save'));
+    assert.ok(main.includes('mem_bridge_save'));
     assert.ok(main.includes('engram-memory'));
     // Both sub-agent markers the plugin's own predicate recognizes.
     assert.equal(provide({ agent: { session: { header: { origin: 'subagent' } } } }), '');

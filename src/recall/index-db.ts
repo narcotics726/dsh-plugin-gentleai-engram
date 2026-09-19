@@ -419,6 +419,24 @@ export class IndexDb {
   }
 
   /**
+   * Open an existing index strictly read-only, creating nothing.
+   *
+   * The candidate query needs this: its contract is "answer from the derived
+   * state as it stands" (design D4), so it must not be able to create, migrate
+   * or otherwise touch the file — opening through `open()` would run
+   * `CREATE TABLE IF NOT EXISTS` and `PRAGMA journal_mode=WAL` on a file that may
+   * not even be an index. Returns `undefined` when the file is absent; a
+   * corrupt file throws at the caller's boundary, where it degrades to "no
+   * candidates".
+   */
+  static openReadOnly(indexPath: string, options: { busyTimeoutMs?: number } = {}): IndexDb | undefined {
+    if (!existsSync(indexPath)) return undefined;
+    const db = new DatabaseSync(indexPath, { readOnly: true });
+    db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(options.busyTimeoutMs ?? DEFAULT_BUSY_TIMEOUT_MS))}`);
+    return new IndexDb(indexPath, db);
+  }
+
+  /**
    * Delete and recreate: only for an index that cannot be read at all (missing
    * or corrupt), never for a routine rebuild — a routine rebuild goes through
    * `sync({ full: true })`, which clears and refills inside ONE transaction.

@@ -40,11 +40,12 @@ test('配置：新键全部有默认值且类型正确（硬规则 5）', () => 
   assert.ok(String(resolved.searchIndexDir).includes(join('storages', 'engram-bridge')));
   assert.ok(String(resolved.searchModelDir).includes(join('storages', 'engram-bridge')));
 
-  // limit 是工具输入，config 不得提供第二个默认（design D6/D9）。
+  // 检索的返回条数是工具输入，config 不得提供第二个默认（design D6/D9）。
+  // 写层的展示条数是另一回事：它是保存结果的渲染参数，不是检索入参。
   assert.deepEqual(
     Object.keys(resolved).filter((key) => /limit/i.test(key)),
-    [],
-    'config 里不应出现 limit',
+    ['saveCandidateLimit'],
+    'config 里不应出现检索的返回条数默认值',
   );
   // 新键一律 search* 前缀，唯一例外是命名运行时参数的 embedThreads。
   assert.deepEqual(

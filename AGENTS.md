@@ -60,6 +60,15 @@ pnpm check:hygiene            # 门禁：全历史扫密钥/本机路径/个人�
 
 - 门禁：`.githooks/pre-commit`（暂存区 + 提交身份）与 `.githooks/pre-push`（全历史）由 `pnpm install` 的 `prepare` 自动启用（`core.hooksPath=.githooks`）；推送前 `pnpm check:hygiene` 必须通过。
 - 加载验证：`dsh --profile web --dump-config | grep engram-bridge`（恰好一次）→ 启动 `dsh web` 看加载日志。
+  - **`--dump-config` 不加载模块**（宿主自己说的：它只打印组合树）。schema 越界、加载期抛错这类问题它一律看不见，而它们在真机上是「装了插件的 profile 全都开不了机」。改完 schema 或加载期校验，**要在真宿主里 boot 一次**（判据见 `docs/engram-upgrade-checklist.md` 第 5 组）。
+  - **dev 期热加载（可选，改 profile 层，不是本仓库的配置）**：`dsh-base` 的 patch 里自带一行 `id: hmr`、`disabled: true`、`config.root: ['.']`；在自己的 profile patch 里把它 `disabled: false` 并把 `root` 指到本仓库的 `dist/`，之后 `pnpm build` 就会**重载插件 entry**（`apply()` 带新代码再跑一次），不必重启 dsh。实测：改一个 `dist/*.js` 后宿主保持在线且 entry 用新内容重新 apply。
+    - 别顺手加 `ignored` 模式：HMR 把 `ignored` 相对于**它自己的 watch base** 求值，写 `**/.*` 这类模式会把 `../..` 形式的相对路径一并吞掉，结果是「看着配了、其实什么都没 watch」。只 watch `dist/` 就够（几十个小文件）。
+    - 重载是**重新 apply**：插件自己 ctx 拥有的副作用先 dispose 再重建（engram 子进程与检索 worker 会换新的）；而某一步的**工具面在该步组装时就冻结了**，所以新工具面从**下一次请求/回合**才可见。
+    - 另一半是 `dsh.profile.patchReload: live`（web profile 已是）：它 watch profile 与 home 两个 **patch 文件**，改配置即时生效——实测改一行 config 会触发同样的重新 apply。两半互相独立：`root` 管代码，`patchReload` 管配置。
+    - **开着它的代价（实测，别想当然）**：往 `dist/` 写进一个坏状态的瞬间，插件 entry 会被**先卸载再重建**。三种形状的读数：加载期 schema 越界 ⇒ 新的 `apply()` **进了但没走完**（注册处抛错）；依赖里的语法错误 ⇒ 连 `apply()` 都没进（导入就失败）；两种情况下**宿主都活着**、engram 工具在那段时间不可用；下一次**成功**构建会**当场自愈**（同一个宿主里重新注册），不必重启。所以它不是「一写坏就 crash，且无法恢复」，但确实是「编辑期间工具会短暂消失」。
+    - 真正的悬崖是**磁盘停留在坏代码 + 重启**：该 profile 开不了机（这与 HMR 无关，HMR 只是让你在编辑中就撞上）。恢复路径实测可用：`dsh --profile <p> --patch <一层把 engram-bridge 设成 disabled: true 的 overlay>`（`--patch` 必须放在 launcher 位置，即 `--profile` 之后、app 自己的旗标之前），先把插件停掉起来修代码。
+    - **正常 `tsc` 构建不会触发中间态**：一次真实构建（重写全部 35 个文件）只引起**一次**重载，而且**走完了**（HMR 的 debounce 把写盘风暴合并成一次，重载读到的是构建结束后的文件）。所以危险的不是「构建过程中的半成品」，而是**构建产出的代码本身越界或坏**（例如 schema 超出宿主子集）。
+    - 手工碰 `dist/`（插桩、替换）前先 `node --check <file>`：这次为了做实验手改 `dist/` 就写出过一个语法错误，正是上面第二种形状——开着 HMR 时它会让线上那个宿主的 engram 工具立刻失效。
 - 卸载验证：停用后 `--dump-config` 无残留，且会话不报错。
 
 ## 禁止

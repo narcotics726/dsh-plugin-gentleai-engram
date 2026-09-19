@@ -225,12 +225,13 @@ test('wiring: 读层工具与 engram 工具面一起注册，注册面 = 声明�
     assert.ok(!names.includes('mcp__engram__mem_search'), '被取代的检索工具不得注册');
     assert.ok(!names.includes('mcp__engram__mem_capture_passive'));
     assert.ok(!names.includes('mcp__engram__mem_save_prompt'));
-    // 绝对计数由**真实** engram 工具面的活宿主验收（tasks 8.1）判定；这里断言的是关系：
-    // 注册面 = 声明面 − 刻意不注册 + 2 个插件自有工具（检索 + 显式入口）。
+    // 绝对计数由**真实** engram 工具面的活宿主验收（tasks 6.2）判定；这里断言的是关系：
+    // 注册面 = 声明面 − 刻意不注册 + 3 个插件自有工具（检索 + 显式入口 + 保存）。
+    // stub 声明与真实后端相同的 22 个工具，所以这个等式在默认门禁里就是 D11 的算术。
     assert.equal(
       names.filter((name) => name.startsWith('mcp__engram__')).length,
-      6,
-      `本 stub 声明 7 个工具、刻意不注册 3 个，加上两个自有工具应为 6，实际 ${names.length}：${names.join(',')}`,
+      22 - 4 + 3,
+      `声明 22、刻意不注册 4、自有 3 ⇒ 应为 21，实际 ${names.length}：${names.join(',')}`,
     );
     assert.ok(
       names.includes('mcp__engram__mem_bridge_recall_sync'),

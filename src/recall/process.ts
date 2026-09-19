@@ -9,6 +9,8 @@ import {
   COMMAND_NAME,
   ONESHOT_BACKLOG_EXIT,
   ONESHOT_RUNTIME_MISSING_EXIT,
+  type CandidatePayload,
+  type CandidateQuery,
   type OneShotSummary,
   type RecallDeferral,
   type RecallErrorKind,
@@ -57,6 +59,30 @@ export class RecallUnavailableError extends Error {
   }
 }
 
+/** A candidate lookup's outcome: the payload, plus why it is empty when it is. */
+export interface CandidateLookupResult {
+  payload: CandidatePayload;
+  /** Set when the lookup did not run or did not finish (`timeout` / `runtime-missing` / ...). */
+  degraded?: RecallErrorKind;
+}
+
+export const EMPTY_CANDIDATE_PAYLOAD: CandidatePayload = {
+  candidates: [],
+  poolIds: [],
+  metering: {
+    sourceChanged: false,
+    lagDocs: 0,
+    docCount: 0,
+    candidates: 0,
+    poolSize: 0,
+    filteredOut: 0,
+    hashMs: 0,
+    embedMs: 0,
+    scoreMs: 0,
+    totalMs: 0,
+  },
+};
+
 export interface RecallWorkerOptions {
   dbPath: string;
   indexPath: string;
@@ -89,6 +115,12 @@ interface Pending {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
+  /**
+   * Drop the per-request listeners (the abort signal). Every path that settles a
+   * pending request must call it, or a long-lived caller signal accumulates
+   * listeners across requests.
+   */
+  cleanup: () => void;
 }
 
 /**
@@ -296,6 +328,7 @@ export class RecallProcessManager {
     if (pending === undefined) return;
     clearTimeout(pending.timer);
     this.pending.delete(frame.id);
+    pending.cleanup();
     if (frame.ok) pending.resolve(frame.result);
     else pending.reject(this.fromWorkerError(frame.error));
   }
@@ -308,31 +341,58 @@ export class RecallProcessManager {
     for (const [id, pending] of this.pending) {
       clearTimeout(pending.timer);
       this.pending.delete(id);
+      pending.cleanup();
       pending.reject(error);
     }
   }
 
-  private async request<T>(payload: Record<string, unknown>): Promise<T> {
+  private async request<T>(
+    payload: Record<string, unknown>,
+    options: { timeoutMs?: number; signal?: AbortSignal; killOnTimeout?: boolean } = {},
+  ): Promise<T> {
     await this.start();
     const child = this.child;
     if (child?.stdin === null || child?.stdin === undefined) {
       throw new RecallUnavailableError('internal', 'engram-bridge: 检索子进程没有可写的 stdin');
     }
+    const budgetMs = options.timeoutMs ?? this.options.timeoutMs;
+    const signal = options.signal;
+    if (signal?.aborted === true) {
+      throw new RecallUnavailableError('cancelled', 'engram-bridge: 本次调用已被发起者取消');
+    }
     const id = this.nextId++;
     const result = new Promise<unknown>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const settle = (): boolean => {
+        if (!this.pending.has(id)) return false;
         this.pending.delete(id);
+        return true;
+      };
+      const timer = setTimeout(() => {
+        if (!settle()) return;
         reject(
           new RecallUnavailableError(
             'timeout',
-            `engram-bridge: 检索调用超过 ${this.options.timeoutMs}ms 未返回，已终止检索子进程。` +
-              '可提高 searchTimeoutMs。',
+            `engram-bridge: 检索调用超过 ${budgetMs}ms 未返回。可提高 searchTimeoutMs。`,
           ),
         );
-        void this.stop('timeout');
-      }, this.options.timeoutMs);
+        // A budget that expired is only grounds for killing the worker on the
+        // paths whose budget IS the worker's capacity. An advisory lookup (the
+        // candidate query) abandons its own request and leaves the worker alone
+        // — it must not cost the read layer its loaded model (design D4/D5).
+        if (options.killOnTimeout !== false) void this.stop('timeout');
+      }, budgetMs);
       timer.unref?.();
-      this.pending.set(id, { resolve, reject, timer });
+      const onAbort = (): void => {
+        if (!settle()) return;
+        reject(new RecallUnavailableError('cancelled', 'engram-bridge: 本次调用已被发起者取消'));
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.pending.set(id, {
+        resolve,
+        reject,
+        timer,
+        cleanup: () => signal?.removeEventListener('abort', onAbort),
+      });
     });
     child.stdin.write(`${JSON.stringify({ id, ...payload })}\n`);
     this.lastUsedAt = Date.now();
@@ -405,6 +465,35 @@ export class RecallProcessManager {
         throw this.refusal(error.deferral);
       }
       throw error;
+    }
+  }
+
+  /**
+   * The candidate lookup for one save: advisory, short-budgeted, silent on
+   * failure.
+   *
+   * It is deliberately NOT `query()`: no `assertInstalled()` (a missing model is
+   * "no candidates", not a refusal), its own `budgetMs`, no worker kill when the
+   * budget expires, and cancellation support — the host's deadline is
+   * cooperative, so a signal that is never passed down is a deadline that does
+   * nothing (design D13). `degraded` carries the reason for the log; the caller
+   * never turns it into a failed save.
+   */
+  async candidates(
+    query: CandidateQuery,
+    options: { budgetMs: number; signal?: AbortSignal },
+  ): Promise<CandidateLookupResult> {
+    try {
+      const payload = await this.request<CandidatePayload>(
+        { cmd: 'candidates', candidateQuery: query },
+        { timeoutMs: options.budgetMs, signal: options.signal, killOnTimeout: false },
+      );
+      return { payload };
+    } catch (error) {
+      const kind = error instanceof RecallUnavailableError ? error.kind : 'internal';
+      const reason = `${kind}: ${errorMessage(error)}`;
+      this.options.log.debug(`候选查询降级（${reason}）`);
+      return { payload: EMPTY_CANDIDATE_PAYLOAD, degraded: kind };
     }
   }
 
